@@ -7,7 +7,9 @@ const PORT = process.env.PORT || 3000;
 
 // Enable CORS for your frontend
 app.use(cors({
-  origin: ['https://zerohedge-quant.vercel.app', 'http://localhost:8000', '*']
+  origin: '*',  // Allow all origins for now
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
