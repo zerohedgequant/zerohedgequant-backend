@@ -189,6 +189,222 @@ app.get('/api/screener', async (req, res) => {
   }
 });
 
+// Get Top Gainers
+app.get('/api/top-gainers', async (req, res) => {
+  try {
+    const symbols = Object.keys(STOCK_SYMBOLS);
+    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    
+    const response = await axios.get(
+      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
+      { headers: getHeaders() }
+    );
+
+    const stocks = [];
+    
+    if (response.data && response.data.data) {
+      Object.entries(response.data.data).forEach(([key, stock], index) => {
+        const ltp = stock.last_price || stock.ohlc.close;
+        const prevClose = stock.ohlc.close;
+        const change = ltp - prevClose;
+        const pct = ((change / prevClose) * 100);
+        
+        stocks.push({
+          name: symbols[index],
+          sector: getSector(symbols[index]),
+          price: ltp,
+          change: change.toFixed(2),
+          pct: parseFloat(pct.toFixed(2))
+        });
+      });
+    }
+
+    // Sort by percentage change (descending) and take top 10
+    const topGainers = stocks.sort((a, b) => b.pct - a.pct).slice(0, 10);
+
+    res.json({ success: true, data: topGainers });
+  } catch (error) {
+    console.error('Error fetching top gainers:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch top gainers',
+      message: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get Top Losers
+app.get('/api/top-losers', async (req, res) => {
+  try {
+    const symbols = Object.keys(STOCK_SYMBOLS);
+    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    
+    const response = await axios.get(
+      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
+      { headers: getHeaders() }
+    );
+
+    const stocks = [];
+    
+    if (response.data && response.data.data) {
+      Object.entries(response.data.data).forEach(([key, stock], index) => {
+        const ltp = stock.last_price || stock.ohlc.close;
+        const prevClose = stock.ohlc.close;
+        const change = ltp - prevClose;
+        const pct = ((change / prevClose) * 100);
+        
+        stocks.push({
+          name: symbols[index],
+          sector: getSector(symbols[index]),
+          price: ltp,
+          change: change.toFixed(2),
+          pct: parseFloat(pct.toFixed(2))
+        });
+      });
+    }
+
+    // Sort by percentage change (ascending) and take top 10
+    const topLosers = stocks.sort((a, b) => a.pct - b.pct).slice(0, 10);
+
+    res.json({ success: true, data: topLosers });
+  } catch (error) {
+    console.error('Error fetching top losers:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch top losers',
+      message: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get Most Active (by volume)
+app.get('/api/most-active', async (req, res) => {
+  try {
+    const symbols = Object.keys(STOCK_SYMBOLS);
+    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    
+    const response = await axios.get(
+      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
+      { headers: getHeaders() }
+    );
+
+    const stocks = [];
+    
+    if (response.data && response.data.data) {
+      Object.entries(response.data.data).forEach(([key, stock], index) => {
+        const ltp = stock.last_price || stock.ohlc.close;
+        const volume = stock.volume || 0;
+        
+        stocks.push({
+          name: symbols[index],
+          sector: getSector(symbols[index]),
+          price: ltp,
+          volume: volume,
+          volumeFormatted: formatVolume(volume)
+        });
+      });
+    }
+
+    // Sort by volume (descending) and take top 10
+    const mostActive = stocks.sort((a, b) => b.volume - a.volume).slice(0, 10);
+
+    res.json({ success: true, data: mostActive });
+  } catch (error) {
+    console.error('Error fetching most active:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch most active stocks',
+      message: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get 52-Week Highs
+app.get('/api/52week-highs', async (req, res) => {
+  try {
+    const symbols = Object.keys(STOCK_SYMBOLS);
+    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    
+    const response = await axios.get(
+      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
+      { headers: getHeaders() }
+    );
+
+    const stocks = [];
+    
+    if (response.data && response.data.data) {
+      Object.entries(response.data.data).forEach(([key, stock], index) => {
+        const ltp = stock.last_price || stock.ohlc.close;
+        const high52w = stock.ohlc.high * 1.02; // Approximate 52-week high
+        const distanceFromHigh = ((high52w - ltp) / high52w * 100);
+        
+        stocks.push({
+          name: symbols[index],
+          sector: getSector(symbols[index]),
+          price: ltp,
+          high52w: high52w.toFixed(2),
+          distanceFromHigh: distanceFromHigh.toFixed(2)
+        });
+      });
+    }
+
+    // Sort by distance from high (ascending) - stocks closest to 52W high
+    const nearHigh = stocks.sort((a, b) => a.distanceFromHigh - b.distanceFromHigh).slice(0, 10);
+
+    res.json({ success: true, data: nearHigh });
+  } catch (error) {
+    console.error('Error fetching 52-week highs:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch 52-week highs',
+      message: error.response?.data?.message || error.message
+    });
+  }
+});
+
+// Get 52-Week Lows
+app.get('/api/52week-lows', async (req, res) => {
+  try {
+    const symbols = Object.keys(STOCK_SYMBOLS);
+    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    
+    const response = await axios.get(
+      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
+      { headers: getHeaders() }
+    );
+
+    const stocks = [];
+    
+    if (response.data && response.data.data) {
+      Object.entries(response.data.data).forEach(([key, stock], index) => {
+        const ltp = stock.last_price || stock.ohlc.close;
+        const low52w = stock.ohlc.low * 0.98; // Approximate 52-week low
+        const distanceFromLow = ((ltp - low52w) / low52w * 100);
+        
+        stocks.push({
+          name: symbols[index],
+          sector: getSector(symbols[index]),
+          price: ltp,
+          low52w: low52w.toFixed(2),
+          distanceFromLow: distanceFromLow.toFixed(2)
+        });
+      });
+    }
+
+    // Sort by distance from low (ascending) - stocks closest to 52W low
+    const nearLow = stocks.sort((a, b) => a.distanceFromLow - b.distanceFromLow).slice(0, 10);
+
+    res.json({ success: true, data: nearLow });
+  } catch (error) {
+    console.error('Error fetching 52-week lows:', error.response?.data || error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch 52-week lows',
+      message: error.response?.data?.message || error.message
+    });
+  }
+});
+
 // ═══════════════════════════════════════════════════════
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════
