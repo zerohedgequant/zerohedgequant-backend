@@ -1,471 +1,358 @@
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Enable CORS for your frontend
 app.use(cors({
-  origin: '*',  // Allow all origins for now
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
 
-// ═══════════════════════════════════════════════════════
-// UPSTOX API CREDENTIALS (Secure - not exposed to frontend)
-// ═══════════════════════════════════════════════════════
-const UPSTOX_CONFIG = {
-  apiKey: 'e58f4629-5461-4568-8d95-a71d860c6321',
-  apiSecret: 'ad0oraj0me',
-  accessToken: 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJDVDMzMjAiLCJqdGkiOiI2OTgzYzg4MTIyOTcxMTc1ZDM3ZjdjZDkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzcwMjQ0MjI1LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3NzAzMjg4MDB9.eYlaUjBZluQiH0Wet7OwHRSRwzsYUgLU-i-F3gPmPwY'
-};
+// ==================== UPSTOX CONFIGURATION ====================
+// New Access Token - Updated 6 Feb 2026
+const UPSTOX_ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiJDVDMzMjAiLCJqdGkiOiI2OTg1OWJjZWIyZDM4MDRmYzRkZjYyOWMiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzcwMzYzODU0LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3NzA0MTUyMDB9.-ipXkL6hFK0t6uZtnksnjKoMLDOi9zRllNEmmZwgkUY';
 
-// Headers for Upstox API
-const getHeaders = () => ({
-  'Authorization': `Bearer ${UPSTOX_CONFIG.accessToken}`,
-  'Accept': 'application/json'
-});
+const UPSTOX_BASE_URL = 'https://api.upstox.com/v2';
 
-// ═══════════════════════════════════════════════════════
-// STOCK SYMBOL MAPPING (NSE symbols)
-// ═══════════════════════════════════════════════════════
+// Stock symbols mapping (NSE)
 const STOCK_SYMBOLS = {
-  'TCS': 'NSE_EQ|INE467B01029',           // TCS
-  'INFY': 'NSE_EQ|INE009A01021',          // Infosys
-  'HDFCBANK': 'NSE_EQ|INE040A01034',      // HDFC Bank
-  'RELIANCE': 'NSE_EQ|INE002A01018',      // Reliance
-  'ICICIBANK': 'NSE_EQ|INE090A01021',     // ICICI Bank
-  'HINDUNILVR': 'NSE_EQ|INE030A01027',    // HUL
-  'SUNPHARMA': 'NSE_EQ|INE044A01036',     // Sun Pharma
-  'MARUTI': 'NSE_EQ|INE585B01010',        // Maruti
-  'DLF': 'NSE_EQ|INE271C01023',           // DLF
-  'NTPC': 'NSE_EQ|INE733E01010',          // NTPC
-  'BAJFINANCE': 'NSE_EQ|INE296A01024',    // Bajaj Finance
-  'ASIANPAINT': 'NSE_EQ|INE021A01026'     // Asian Paints
+  'RELIANCE': 'NSE_EQ|INE002A01018',
+  'TCS': 'NSE_EQ|INE467B01029',
+  'HDFCBANK': 'NSE_EQ|INE040A01034',
+  'INFY': 'NSE_EQ|INE009A01021',
+  'ICICIBANK': 'NSE_EQ|INE090A01021',
+  'BHARTIARTL': 'NSE_EQ|INE397D01024',
+  'SBIN': 'NSE_EQ|INE062A01020',
+  'ITC': 'NSE_EQ|INE154A01025',
+  'KOTAKBANK': 'NSE_EQ|INE237A01028',
+  'LT': 'NSE_EQ|INE018A01030',
+  'AXISBANK': 'NSE_EQ|INE238A01034',
+  'WIPRO': 'NSE_EQ|INE075A01022',
+  'TATAMOTORS': 'NSE_EQ|INE155A01022',
+  'SUNPHARMA': 'NSE_EQ|INE044A01036',
+  'MARUTI': 'NSE_EQ|INE585B01010',
+  'TITAN': 'NSE_EQ|INE280A01028',
+  'ASIANPAINT': 'NSE_EQ|INE021A01026',
+  'BAJFINANCE': 'NSE_EQ|INE296A01024',
+  'HCLTECH': 'NSE_EQ|INE860A01027',
+  'NTPC': 'NSE_EQ|INE733E01010',
+  'POWERGRID': 'NSE_EQ|INE752E01010',
+  'ONGC': 'NSE_EQ|INE213A01029',
+  'COALINDIA': 'NSE_EQ|INE522F01014',
+  'JSWSTEEL': 'NSE_EQ|INE019A01038',
+  'TATASTEEL': 'NSE_EQ|INE081A01020',
+  'HINDALCO': 'NSE_EQ|INE038A01020',
+  'ADANIENT': 'NSE_EQ|INE423A01024',
+  'ADANIPORTS': 'NSE_EQ|INE742F01042',
+  'ULTRACEMCO': 'NSE_EQ|INE481G01011',
+  'GRASIM': 'NSE_EQ|INE047A01021',
+  'TECHM': 'NSE_EQ|INE669C01036',
+  'DRREDDY': 'NSE_EQ|INE089A01023',
+  'CIPLA': 'NSE_EQ|INE059A01026',
+  'APOLLOHOSP': 'NSE_EQ|INE437A01024',
+  'EICHERMOT': 'NSE_EQ|INE066A01021',
+  'BAJAJ-AUTO': 'NSE_EQ|INE917I01010',
+  'HEROMOTOCO': 'NSE_EQ|INE158A01026',
+  'M&M': 'NSE_EQ|INE101A01026',
+  'NESTLEIND': 'NSE_EQ|INE239A01016',
+  'BRITANNIA': 'NSE_EQ|INE216A01030',
+  'DIVISLAB': 'NSE_EQ|INE361B01024',
+  'BPCL': 'NSE_EQ|INE541A01028',
+  'IOC': 'NSE_EQ|INE242A01010',
+  'INDUSINDBK': 'NSE_EQ|INE095A01012',
+  'TATACONSUM': 'NSE_EQ|INE192A01025',
+  'SBILIFE': 'NSE_EQ|INE123W01016',
+  'HDFCLIFE': 'NSE_EQ|INE795G01014',
+  'SHRIRAMFIN': 'NSE_EQ|INE721A01013',
+  'HINDUNILVR': 'NSE_EQ|INE030A01027'
 };
 
-// ═══════════════════════════════════════════════════════
-// API ENDPOINTS
-// ═══════════════════════════════════════════════════════
+// Index symbols
+const INDEX_SYMBOLS = {
+  'NIFTY': 'NSE_INDEX|Nifty 50',
+  'SENSEX': 'BSE_INDEX|SENSEX',
+  'BANKNIFTY': 'NSE_INDEX|Nifty Bank',
+  'NIFTYIT': 'NSE_INDEX|Nifty IT',
+  'VIX': 'NSE_INDEX|India VIX'
+};
+
+// ==================== API ROUTES ====================
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ZerohedgeQuant API Server Running', timestamp: new Date() });
+  res.json({ 
+    status: 'OK', 
+    message: 'ZerohedgeQuant API is running',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Get Market Data for multiple stocks
+// Get market data (indices + stocks)
 app.get('/api/market-data', async (req, res) => {
   try {
-    const symbols = Object.keys(STOCK_SYMBOLS).slice(0, 10); // Get first 10 stocks
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    // Fetch index data
+    const indexData = await fetchIndexData();
     
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const marketData = [];
+    // Fetch stock data
+    const stockData = await fetchStockData();
     
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const quote = stock.ohlc;
-        const ltp = stock.last_price || quote.close;
-        const prevClose = quote.close;
-        const change = ltp - prevClose;
-        const pct = ((change / prevClose) * 100).toFixed(2);
-        
-        marketData.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          change: change.toFixed(2),
-          pct: parseFloat(pct),
-          vol: formatVolume(stock.volume || 0),
-          cap: getMarketCap(symbols[index]),
-          spark: generateSparkline()
-        });
-      });
-    }
-
-    res.json({ success: true, data: marketData });
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      nifty: indexData.nifty,
+      sensex: indexData.sensex,
+      banknifty: indexData.banknifty,
+      vix: indexData.vix,
+      stocks: stockData
+    });
   } catch (error) {
-    console.error('Error fetching market data:', error.response?.data || error.message);
+    console.error('Error fetching market data:', error.message);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch market data',
-      message: error.response?.data?.message || error.message
+      error: error.message 
     });
   }
 });
 
-// Get Index Data (Nifty, Sensex, etc)
-app.get('/api/indices', async (req, res) => {
+// Get single stock quote
+app.get('/api/quote/:symbol', async (req, res) => {
   try {
-    const indices = [
-      'NSE_INDEX|Nifty 50',
-      'NSE_INDEX|Nifty Bank',
-      'BSE_INDEX|SENSEX'
-    ].join(',');
-
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${indices}`,
-      { headers: getHeaders() }
-    );
-
-    const indexData = {};
+    const symbol = req.params.symbol.toUpperCase();
+    const instrumentKey = STOCK_SYMBOLS[symbol];
     
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, index]) => {
-        const ltp = index.last_price;
-        const prevClose = index.ohlc.close;
-        const change = ltp - prevClose;
-        const pct = ((change / prevClose) * 100).toFixed(2);
-        
-        const name = key.includes('Nifty 50') ? 'nifty' : 
-                     key.includes('Nifty Bank') ? 'banknifty' : 'sensex';
-        
-        indexData[name] = {
-          value: ltp.toFixed(2),
-          change: change.toFixed(2),
-          pct: parseFloat(pct)
-        };
+    if (!instrumentKey) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Symbol not found' 
       });
     }
-
-    res.json({ success: true, data: indexData });
+    
+    const quote = await fetchQuote(instrumentKey);
+    res.json({
+      success: true,
+      symbol: symbol,
+      data: quote
+    });
   } catch (error) {
-    console.error('Error fetching indices:', error.response?.data || error.message);
+    console.error('Error fetching quote:', error.message);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch indices',
-      message: error.response?.data?.message || error.message
+      error: error.message 
     });
   }
 });
 
-// Get Screener Data (with fundamentals approximation)
-app.get('/api/screener', async (req, res) => {
+// Get multiple stock quotes
+app.get('/api/quotes', async (req, res) => {
   try {
-    const symbols = Object.keys(STOCK_SYMBOLS);
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    const symbols = req.query.symbols?.split(',') || Object.keys(STOCK_SYMBOLS);
+    const quotes = {};
     
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const screenerData = [];
-    
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const ltp = stock.last_price || stock.ohlc.close;
-        
-        screenerData.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          pe: getFundamental(symbols[index], 'pe'),
-          roe: getFundamental(symbols[index], 'roe'),
-          cap: getMarketCap(symbols[index]),
-          hi: stock.ohlc.high || (ltp * 1.15).toFixed(2),
-          lo: stock.ohlc.low || (ltp * 0.85).toFixed(2),
-          de: getFundamental(symbols[index], 'de'),
-          div: getFundamental(symbols[index], 'div')
-        });
-      });
+    for (const symbol of symbols.slice(0, 50)) {
+      const instrumentKey = STOCK_SYMBOLS[symbol.toUpperCase()];
+      if (instrumentKey) {
+        try {
+          const quote = await fetchQuote(instrumentKey);
+          quotes[symbol.toUpperCase()] = quote;
+        } catch (e) {
+          console.error(`Error fetching ${symbol}:`, e.message);
+        }
+      }
     }
-
-    res.json({ success: true, data: screenerData });
+    
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      quotes: quotes
+    });
   } catch (error) {
-    console.error('Error fetching screener data:', error.response?.data || error.message);
+    console.error('Error fetching quotes:', error.message);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch screener data',
-      message: error.response?.data?.message || error.message
+      error: error.message 
     });
   }
 });
 
-// Get Top Gainers
-app.get('/api/top-gainers', async (req, res) => {
+// Get option chain
+app.get('/api/option-chain/:symbol', async (req, res) => {
   try {
-    const symbols = Object.keys(STOCK_SYMBOLS);
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
+    const symbol = req.params.symbol.toUpperCase();
+    const expiry = req.query.expiry;
     
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const stocks = [];
+    const response = await axios.get(`${UPSTOX_BASE_URL}/option/chain`, {
+      params: {
+        instrument_key: STOCK_SYMBOLS[symbol] || `NSE_INDEX|${symbol}`,
+        expiry_date: expiry
+      },
+      headers: {
+        'Authorization': `Bearer ${UPSTOX_ACCESS_TOKEN}`,
+        'Accept': 'application/json'
+      }
+    });
     
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const ltp = stock.last_price || stock.ohlc.close;
-        const prevClose = stock.ohlc.close;
-        const change = ltp - prevClose;
-        const pct = ((change / prevClose) * 100);
-        
-        stocks.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          change: change.toFixed(2),
-          pct: parseFloat(pct.toFixed(2))
-        });
-      });
-    }
-
-    // Sort by percentage change (descending) and take top 10
-    const topGainers = stocks.sort((a, b) => b.pct - a.pct).slice(0, 10);
-
-    res.json({ success: true, data: topGainers });
+    res.json({
+      success: true,
+      symbol: symbol,
+      data: response.data.data
+    });
   } catch (error) {
-    console.error('Error fetching top gainers:', error.response?.data || error.message);
+    console.error('Error fetching option chain:', error.message);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch top gainers',
-      message: error.response?.data?.message || error.message
+      error: error.message 
     });
   }
 });
 
-// Get Top Losers
-app.get('/api/top-losers', async (req, res) => {
+// ==================== HELPER FUNCTIONS ====================
+
+async function fetchQuote(instrumentKey) {
   try {
-    const symbols = Object.keys(STOCK_SYMBOLS);
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
-    
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const stocks = [];
-    
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const ltp = stock.last_price || stock.ohlc.close;
-        const prevClose = stock.ohlc.close;
-        const change = ltp - prevClose;
-        const pct = ((change / prevClose) * 100);
-        
-        stocks.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          change: change.toFixed(2),
-          pct: parseFloat(pct.toFixed(2))
-        });
-      });
-    }
-
-    // Sort by percentage change (ascending) and take top 10
-    const topLosers = stocks.sort((a, b) => a.pct - b.pct).slice(0, 10);
-
-    res.json({ success: true, data: topLosers });
-  } catch (error) {
-    console.error('Error fetching top losers:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch top losers',
-      message: error.response?.data?.message || error.message
+    const response = await axios.get(`${UPSTOX_BASE_URL}/market-quote/quotes`, {
+      params: {
+        instrument_key: instrumentKey
+      },
+      headers: {
+        'Authorization': `Bearer ${UPSTOX_ACCESS_TOKEN}`,
+        'Accept': 'application/json'
+      }
     });
-  }
-});
-
-// Get Most Active (by volume)
-app.get('/api/most-active', async (req, res) => {
-  try {
-    const symbols = Object.keys(STOCK_SYMBOLS);
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
     
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const stocks = [];
+    const data = response.data.data[instrumentKey];
+    if (!data) return null;
     
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const ltp = stock.last_price || stock.ohlc.close;
-        const volume = stock.volume || 0;
-        
-        stocks.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          volume: volume,
-          volumeFormatted: formatVolume(volume)
-        });
-      });
-    }
-
-    // Sort by volume (descending) and take top 10
-    const mostActive = stocks.sort((a, b) => b.volume - a.volume).slice(0, 10);
-
-    res.json({ success: true, data: mostActive });
+    return {
+      price: data.last_price,
+      open: data.ohlc?.open,
+      high: data.ohlc?.high,
+      low: data.ohlc?.low,
+      close: data.ohlc?.close,
+      change: data.net_change,
+      changePct: data.change,
+      volume: data.volume,
+      timestamp: data.last_trade_time
+    };
   } catch (error) {
-    console.error('Error fetching most active:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch most active stocks',
-      message: error.response?.data?.message || error.message
-    });
+    console.error(`Error fetching quote for ${instrumentKey}:`, error.message);
+    return null;
   }
-});
+}
 
-// Get 52-Week Highs
-app.get('/api/52week-highs', async (req, res) => {
-  try {
-    const symbols = Object.keys(STOCK_SYMBOLS);
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
-    
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const stocks = [];
-    
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const ltp = stock.last_price || stock.ohlc.close;
-        const high52w = stock.ohlc.high * 1.02; // Approximate 52-week high
-        const distanceFromHigh = ((high52w - ltp) / high52w * 100);
-        
-        stocks.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          high52w: high52w.toFixed(2),
-          distanceFromHigh: distanceFromHigh.toFixed(2)
-        });
-      });
-    }
-
-    // Sort by distance from high (ascending) - stocks closest to 52W high
-    const nearHigh = stocks.sort((a, b) => a.distanceFromHigh - b.distanceFromHigh).slice(0, 10);
-
-    res.json({ success: true, data: nearHigh });
-  } catch (error) {
-    console.error('Error fetching 52-week highs:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch 52-week highs',
-      message: error.response?.data?.message || error.message
-    });
-  }
-});
-
-// Get 52-Week Lows
-app.get('/api/52week-lows', async (req, res) => {
-  try {
-    const symbols = Object.keys(STOCK_SYMBOLS);
-    const instrumentKeys = symbols.map(s => STOCK_SYMBOLS[s]).join(',');
-    
-    const response = await axios.get(
-      `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${instrumentKeys}`,
-      { headers: getHeaders() }
-    );
-
-    const stocks = [];
-    
-    if (response.data && response.data.data) {
-      Object.entries(response.data.data).forEach(([key, stock], index) => {
-        const ltp = stock.last_price || stock.ohlc.close;
-        const low52w = stock.ohlc.low * 0.98; // Approximate 52-week low
-        const distanceFromLow = ((ltp - low52w) / low52w * 100);
-        
-        stocks.push({
-          name: symbols[index],
-          sector: getSector(symbols[index]),
-          price: ltp,
-          low52w: low52w.toFixed(2),
-          distanceFromLow: distanceFromLow.toFixed(2)
-        });
-      });
-    }
-
-    // Sort by distance from low (ascending) - stocks closest to 52W low
-    const nearLow = stocks.sort((a, b) => a.distanceFromLow - b.distanceFromLow).slice(0, 10);
-
-    res.json({ success: true, data: nearLow });
-  } catch (error) {
-    console.error('Error fetching 52-week lows:', error.response?.data || error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch 52-week lows',
-      message: error.response?.data?.message || error.message
-    });
-  }
-});
-
-// ═══════════════════════════════════════════════════════
-// HELPER FUNCTIONS
-// ═══════════════════════════════════════════════════════
-
-function getSector(symbol) {
-  const sectors = {
-    'TCS': 'IT', 'INFY': 'IT',
-    'HDFCBANK': 'Banking', 'ICICIBANK': 'Banking', 'BAJFINANCE': 'Banking',
-    'HINDUNILVR': 'FMCG', 'ASIANPAINT': 'FMCG',
-    'SUNPHARMA': 'Pharma',
-    'MARUTI': 'Auto',
-    'DLF': 'Realty',
-    'RELIANCE': 'Energy', 'NTPC': 'Energy'
+async function fetchIndexData() {
+  const indices = {
+    nifty: null,
+    sensex: null,
+    banknifty: null,
+    vix: null
   };
-  return sectors[symbol] || 'Other';
+  
+  try {
+    // Fetch Nifty 50
+    const niftyResponse = await axios.get(`${UPSTOX_BASE_URL}/market-quote/quotes`, {
+      params: { instrument_key: INDEX_SYMBOLS.NIFTY },
+      headers: {
+        'Authorization': `Bearer ${UPSTOX_ACCESS_TOKEN}`,
+        'Accept': 'application/json'
+      }
+    });
+    
+    const niftyData = niftyResponse.data.data[INDEX_SYMBOLS.NIFTY];
+    if (niftyData) {
+      indices.nifty = {
+        value: niftyData.last_price,
+        change: niftyData.net_change,
+        changePct: niftyData.change
+      };
+    }
+  } catch (e) {
+    console.error('Error fetching Nifty:', e.message);
+  }
+  
+  try {
+    // Fetch Bank Nifty
+    const bankNiftyResponse = await axios.get(`${UPSTOX_BASE_URL}/market-quote/quotes`, {
+      params: { instrument_key: INDEX_SYMBOLS.BANKNIFTY },
+      headers: {
+        'Authorization': `Bearer ${UPSTOX_ACCESS_TOKEN}`,
+        'Accept': 'application/json'
+      }
+    });
+    
+    const bankNiftyData = bankNiftyResponse.data.data[INDEX_SYMBOLS.BANKNIFTY];
+    if (bankNiftyData) {
+      indices.banknifty = {
+        value: bankNiftyData.last_price,
+        change: bankNiftyData.net_change,
+        changePct: bankNiftyData.change
+      };
+    }
+  } catch (e) {
+    console.error('Error fetching Bank Nifty:', e.message);
+  }
+  
+  try {
+    // Fetch VIX
+    const vixResponse = await axios.get(`${UPSTOX_BASE_URL}/market-quote/quotes`, {
+      params: { instrument_key: INDEX_SYMBOLS.VIX },
+      headers: {
+        'Authorization': `Bearer ${UPSTOX_ACCESS_TOKEN}`,
+        'Accept': 'application/json'
+      }
+    });
+    
+    const vixData = vixResponse.data.data[INDEX_SYMBOLS.VIX];
+    if (vixData) {
+      indices.vix = {
+        value: vixData.last_price,
+        change: vixData.net_change,
+        changePct: vixData.change
+      };
+    }
+  } catch (e) {
+    console.error('Error fetching VIX:', e.message);
+  }
+  
+  return indices;
 }
 
-function getMarketCap(symbol) {
-  const caps = {
-    'TCS': '1,41,234', 'INFY': '72,418', 'HDFCBANK': '1,33,890',
-    'RELIANCE': '1,95,102', 'ICICIBANK': '62,340', 'HINDUNILVR': '52,768',
-    'SUNPHARMA': '37,486', 'MARUTI': '33,744', 'DLF': '19,082',
-    'NTPC': '37,264', 'BAJFINANCE': '48,820', 'ASIANPAINT': '25,366'
-  };
-  return caps[symbol] || '10,000';
+async function fetchStockData() {
+  const stocks = {};
+  const symbols = Object.keys(STOCK_SYMBOLS);
+  
+  // Fetch in batches of 10 to avoid rate limiting
+  for (let i = 0; i < symbols.length; i += 10) {
+    const batch = symbols.slice(i, i + 10);
+    
+    await Promise.all(batch.map(async (symbol) => {
+      try {
+        const quote = await fetchQuote(STOCK_SYMBOLS[symbol]);
+        if (quote) {
+          stocks[symbol] = quote;
+        }
+      } catch (e) {
+        console.error(`Error fetching ${symbol}:`, e.message);
+      }
+    }));
+    
+    // Small delay between batches
+    if (i + 10 < symbols.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  
+  return stocks;
 }
 
-function getFundamental(symbol, type) {
-  const data = {
-    'TCS': { pe: 28.4, roe: 24.8, de: 0.02, div: 1.72 },
-    'INFY': { pe: 25.6, roe: 28.4, de: 0.01, div: 2.14 },
-    'HDFCBANK': { pe: 22.1, roe: 18.2, de: 0.14, div: 1.42 },
-    'RELIANCE': { pe: 24.8, roe: 14.6, de: 0.21, div: 0.87 },
-    'ICICIBANK': { pe: 19.4, roe: 17.6, de: 0.11, div: 1.88 },
-    'HINDUNILVR': { pe: 48.6, roe: 20.2, de: 0.08, div: 2.48 },
-    'SUNPHARMA': { pe: 34.2, roe: 16.8, de: 0.18, div: 0.62 },
-    'MARUTI': { pe: 26.3, roe: 19.4, de: 0.04, div: 1.34 },
-    'DLF': { pe: 38.1, roe: 22.6, de: 0.32, div: 0.44 },
-    'NTPC': { pe: 16.8, roe: 12.4, de: 0.45, div: 3.12 },
-    'BAJFINANCE': { pe: 29.4, roe: 21.8, de: 0.72, div: 1.06 },
-    'ASIANPAINT': { pe: 52.4, roe: 26.8, de: 0.06, div: 1.82 }
-  };
-  return data[symbol]?.[type] || 0;
-}
-
-function formatVolume(vol) {
-  if (vol > 1000000) return `${(vol / 1000000).toFixed(1)}M`;
-  if (vol > 1000) return `${(vol / 1000).toFixed(1)}K`;
-  return vol.toString();
-}
-
-function generateSparkline() {
-  return Array.from({length: 7}, () => Math.random() * 4);
-}
-
-// ═══════════════════════════════════════════════════════
-// START SERVER
-// ═══════════════════════════════════════════════════════
-
+// ==================== START SERVER ====================
 app.listen(PORT, () => {
-  console.log(`🚀 ZerohedgeQuant API Server running on port ${PORT}`);
-  console.log(`🔒 Upstox credentials secured`);
-  console.log(`📊 Ready to serve market data`);
+  console.log(`🚀 ZerohedgeQuant API running on port ${PORT}`);
+  console.log(`📊 Monitoring ${Object.keys(STOCK_SYMBOLS).length} stocks`);
+  console.log(`🔗 Health check: http://localhost:${PORT}/`);
 });
