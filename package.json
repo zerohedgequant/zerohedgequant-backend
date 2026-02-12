@@ -1,17 +1,13 @@
 {
   "name": "zerohedgequant-backend",
-  "version": "3.0.0",
-  "description": "ZerohedgeQuant API - Indian Market Data via Upstox",
+  "version": "5.0.0",
+  "description": "ZerohedgeQuant Production API - Real market data only",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "axios": "^1.6.2"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "engines": { "node": ">=18.0.0" }
 }
