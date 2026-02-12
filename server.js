@@ -14,10 +14,10 @@ app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: [
 app.use(express.json());
 
 // ═══════════════════════════════════════════════════════
-// STOCK UNIVERSE — ISIN keys (confirmed working)
+// STOCK UNIVERSE — 50 Nifty stocks, confirmed ISINs
 // ═══════════════════════════════════════════════════════
 const STOCKS = {
-  'RELIANCE':   { name: 'Reliance Industries', sector: 'Energy', industry: 'Oil & Gas - Refining', isin: 'INE002A01018' },
+  'RELIANCE':   { name: 'Reliance Industries', sector: 'Energy', industry: 'Oil & Gas', isin: 'INE002A01018' },
   'TCS':        { name: 'Tata Consultancy Services', sector: 'Technology', industry: 'IT Services', isin: 'INE467B01029' },
   'HDFCBANK':   { name: 'HDFC Bank', sector: 'Financial', industry: 'Banks - Private', isin: 'INE040A01034' },
   'INFY':       { name: 'Infosys', sector: 'Technology', industry: 'IT Services', isin: 'INE009A01021' },
@@ -70,33 +70,125 @@ const STOCKS = {
 };
 
 // ═══════════════════════════════════════════════════════
-// UPSTOX HELPERS
+// UPSTOX HELPER (confirmed working format: NSE_EQ|ISIN)
 // ═══════════════════════════════════════════════════════
 async function upstoxFetch(endpoint, params = {}) {
   try {
     const r = await axios.get(`${CONFIG.baseUrl}${endpoint}`, {
       headers: { 'Authorization': `Bearer ${CONFIG.accessToken}`, 'Accept': 'application/json' },
-      params,
-      timeout: 12000
+      params, timeout: 12000
     });
     return r.data;
   } catch (err) {
-    const status = err.response?.status;
-    const msg = err.response?.data?.errors?.[0]?.message || err.message;
-    console.error(`[Upstox ${endpoint}] ${status}: ${msg}`);
+    const s = err.response?.status;
+    const m = err.response?.data?.errors?.[0]?.message || err.message;
+    console.error(`[Upstox ${endpoint}] ${s}: ${m}`);
     return null;
   }
 }
 
-function instKey(sym) {
-  return STOCKS[sym] ? `NSE_EQ|${STOCKS[sym].isin}` : null;
-}
-
-function matchSymbol(rawKey, batchSymbols) {
-  for (const sym of batchSymbols) {
+function matchSymbol(rawKey, batch) {
+  for (const sym of batch) {
     if (rawKey.includes(STOCKS[sym].isin)) return sym;
   }
   return null;
+}
+
+// ═══════════════════════════════════════════════════════
+// YAHOO FINANCE HELPER (real fundamentals)
+// ═══════════════════════════════════════════════════════
+const yahooCache = {}; // { symbol: { data, ts } }
+const YAHOO_TTL = 4 * 60 * 60 * 1000; // 4 hours
+
+async function fetchYahooFundamentals(symbol) {
+  // Check cache
+  const cached = yahooCache[symbol];
+  if (cached && Date.now() - cached.ts < YAHOO_TTL) return cached.data;
+
+  const yahooSym = symbol.replace('&', '%26') + '.NS';
+  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSym}?modules=price,summaryDetail,defaultKeyStatistics,financialData`;
+
+  try {
+    const resp = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      },
+      timeout: 8000
+    });
+
+    const result = resp.data?.quoteSummary?.result?.[0];
+    if (!result) return null;
+
+    const sd = result.summaryDetail || {};
+    const ks = result.defaultKeyStatistics || {};
+    const fd = result.financialData || {};
+    const pr = result.price || {};
+
+    const extract = (obj) => obj?.raw ?? obj?.fmt ?? null;
+
+    const data = {
+      // Valuation
+      pe: extract(sd.trailingPE),
+      fwdPe: extract(ks.forwardPE),
+      pb: extract(ks.priceToBook),
+      peg: extract(ks.pegRatio),
+      evEbitda: extract(ks.enterpriseToEbitda),
+      ps: extract(ks.priceToSalesTrailing12Months),
+      marketCap: extract(pr.marketCap),
+      // Profitability
+      roe: extract(fd.returnOnEquity) ? +(extract(fd.returnOnEquity) * 100).toFixed(2) : null,
+      roa: extract(fd.returnOnAssets) ? +(extract(fd.returnOnAssets) * 100).toFixed(2) : null,
+      grossMargin: extract(fd.grossMargins) ? +(extract(fd.grossMargins) * 100).toFixed(2) : null,
+      operatingMargin: extract(fd.operatingMargins) ? +(extract(fd.operatingMargins) * 100).toFixed(2) : null,
+      netMargin: extract(fd.profitMargins) ? +(extract(fd.profitMargins) * 100).toFixed(2) : null,
+      // Per share
+      eps: extract(sd.trailingEps) || extract(ks.trailingEps),
+      bookValue: extract(ks.bookValue),
+      // Dividends
+      dividend: extract(sd.dividendYield) ? +(extract(sd.dividendYield) * 100).toFixed(2) : null,
+      dividendRate: extract(sd.dividendRate),
+      // Risk
+      beta: extract(ks.beta),
+      debtEquity: extract(fd.debtToEquity) ? +(extract(fd.debtToEquity)).toFixed(2) : null,
+      currentRatio: extract(fd.currentRatio),
+      // 52 week
+      high52w: extract(sd.fiftyTwoWeekHigh),
+      low52w: extract(sd.fiftyTwoWeekLow),
+      sma50: extract(sd.fiftyDayAverage),
+      sma200: extract(sd.twoHundredDayAverage),
+      // Growth
+      revenueGrowth: extract(fd.revenueGrowth) ? +(extract(fd.revenueGrowth) * 100).toFixed(2) : null,
+      earningsGrowth: extract(fd.earningsGrowth) ? +(extract(fd.earningsGrowth) * 100).toFixed(2) : null,
+      // Target
+      targetPrice: extract(fd.targetMeanPrice),
+      analystRec: fd.recommendationKey || null,
+      numAnalysts: extract(fd.numberOfAnalystOpinions),
+    };
+
+    yahooCache[symbol] = { data, ts: Date.now() };
+    return data;
+  } catch (err) {
+    console.error(`[Yahoo ${symbol}] ${err.response?.status || err.message}`);
+    return null;
+  }
+}
+
+// Background: fetch fundamentals for all stocks gradually
+let yahooFetchInProgress = false;
+async function backgroundFetchFundamentals() {
+  if (yahooFetchInProgress) return;
+  yahooFetchInProgress = true;
+  console.log('[Yahoo] Starting background fundamental fetch...');
+  let count = 0;
+  for (const sym of Object.keys(STOCKS)) {
+    if (yahooCache[sym] && Date.now() - yahooCache[sym].ts < YAHOO_TTL) continue;
+    await fetchYahooFundamentals(sym);
+    count++;
+    await new Promise(r => setTimeout(r, 500)); // Rate limit: 2 req/sec
+  }
+  console.log(`[Yahoo] Background fetch done. ${count} stocks updated.`);
+  yahooFetchInProgress = false;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -129,12 +221,18 @@ function withCache(key, ttlMs, fetchFn) {
 // ROUTES
 // ═══════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ service: 'ZerohedgeQuant API v4.0', status: 'running', stocks: Object.keys(STOCKS).length, tokenSet: !!CONFIG.accessToken });
+  res.json({
+    service: 'ZerohedgeQuant API v5.0 (Production)',
+    status: 'running',
+    stocks: Object.keys(STOCKS).length,
+    tokenSet: !!CONFIG.accessToken,
+    yahooFundamentals: Object.keys(yahooCache).length,
+    dataDisclaimer: 'Prices from Upstox. Fundamentals from Yahoo Finance. Option chain from Upstox.'
+  });
 });
 
-// ── INDICES (confirmed: NSE_INDEX|Nifty 50 works) ──
+// ── INDICES ──
 app.get('/api/indices', withCache('indices', 10000, async () => {
-  // Fetch one at a time since batch might have encoding issues
   const indexList = [
     { key: 'NSE_INDEX|Nifty 50', label: 'NIFTY50' },
     { key: 'NSE_INDEX|Nifty Bank', label: 'BANKNIFTY' },
@@ -144,111 +242,93 @@ app.get('/api/indices', withCache('indices', 10000, async () => {
 
   const out = {};
   for (const idx of indexList) {
-    const result = await upstoxFetch('/market-quote/ltp', { instrument_key: idx.key });
+    // Use full quotes for NIFTY50 to get OHLC, LTP for others
+    const endpoint = idx.label === 'NIFTY50' ? '/market-quote/quotes' : '/market-quote/ltp';
+    const result = await upstoxFetch(endpoint, { instrument_key: idx.key });
     if (result?.data) {
       const val = Object.values(result.data)[0];
-      if (val && val.last_price) {
+      if (val) {
         out[idx.label] = {
-          value: val.last_price,
+          value: val.last_price || 0,
           change: val.net_change || 0,
           changePct: val.percentage_change || 0,
+          open: val.ohlc?.open || 0,
+          high: val.ohlc?.high || 0,
+          low: val.ohlc?.low || 0,
+          prevClose: val.ohlc?.close || 0,
         };
       }
     }
   }
-
-  // Now get full quotes for NIFTY50 to get OHLC
-  const niftyFull = await upstoxFetch('/market-quote/quotes', { instrument_key: 'NSE_INDEX|Nifty 50' });
-  if (niftyFull?.data) {
-    const v = Object.values(niftyFull.data)[0];
-    if (v && out.NIFTY50) {
-      out.NIFTY50.change = v.net_change || out.NIFTY50.change;
-      out.NIFTY50.changePct = v.percentage_change || out.NIFTY50.changePct;
-      out.NIFTY50.open = v.ohlc?.open || 0;
-      out.NIFTY50.high = v.ohlc?.high || 0;
-      out.NIFTY50.low = v.ohlc?.low || 0;
-      out.NIFTY50.prevClose = v.ohlc?.close || 0;
-    }
-  }
-
-  console.log(`[Indices] Loaded: ${Object.keys(out).join(', ')} | NIFTY=${out.NIFTY50?.value || 'N/A'}`);
+  console.log(`[Indices] ${Object.keys(out).join(', ')}`);
   return out;
 }));
 
-// ── MARKET DATA (all stocks) ──
+// ── MARKET DATA ──
 app.get('/api/market-data', withCache('market', 15000, async () => {
   const symbols = Object.keys(STOCKS);
   const allData = {};
   let liveCount = 0;
 
-  // Fetch in small batches of 10 using ISIN keys
   for (let i = 0; i < symbols.length; i += 10) {
     const batch = symbols.slice(i, i + 10);
-    const keys = batch.map(s => instKey(s)).filter(Boolean);
-    const joined = keys.join(',');
-
-    const result = await upstoxFetch('/market-quote/quotes', { instrument_key: joined });
+    const keys = batch.map(s => `NSE_EQ|${STOCKS[s].isin}`).join(',');
+    const result = await upstoxFetch('/market-quote/quotes', { instrument_key: keys });
     if (result?.data) {
       for (const [rawKey, val] of Object.entries(result.data)) {
         if (!val || !val.last_price) continue;
         const sym = matchSymbol(rawKey, batch);
         if (sym) {
           allData[sym] = {
-            symbol: sym,
-            name: STOCKS[sym].name,
-            sector: STOCKS[sym].sector,
-            industry: STOCKS[sym].industry,
-            price: val.last_price || 0,
-            change: val.net_change || 0,
-            changePct: val.percentage_change || 0,
-            open: val.ohlc?.open || 0,
-            high: val.ohlc?.high || 0,
-            low: val.ohlc?.low || 0,
-            prevClose: val.ohlc?.close || 0,
-            volume: val.volume || 0,
-            upperCircuit: val.upper_circuit_limit || 0,
-            lowerCircuit: val.lower_circuit_limit || 0,
+            symbol: sym, name: STOCKS[sym].name, sector: STOCKS[sym].sector, industry: STOCKS[sym].industry,
+            price: val.last_price, change: val.net_change || 0, changePct: val.percentage_change || 0,
+            open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0,
+            prevClose: val.ohlc?.close || 0, volume: val.volume || 0,
           };
           liveCount++;
         }
       }
     }
-    // Rate limit pause
     if (i + 10 < symbols.length) await new Promise(r => setTimeout(r, 400));
   }
 
-  // Fill missing stocks
   for (const [sym, info] of Object.entries(STOCKS)) {
-    if (!allData[sym]) {
-      allData[sym] = { symbol: sym, name: info.name, sector: info.sector, industry: info.industry, price: 0, change: 0, changePct: 0, volume: 0 };
-    }
+    if (!allData[sym]) allData[sym] = { symbol: sym, name: info.name, sector: info.sector, industry: info.industry, price: 0, change: 0, changePct: 0, volume: 0 };
   }
 
-  console.log(`[Market] ${liveCount}/${symbols.length} stocks with live prices`);
+  console.log(`[Market] ${liveCount}/${symbols.length} live`);
   return allData;
 }));
 
-// ── SINGLE STOCK ──
+// ── SINGLE STOCK (Upstox price + Yahoo fundamentals) ──
 app.get('/api/stock/:symbol', async (req, res) => {
   const sym = req.params.symbol.toUpperCase();
   const info = STOCKS[sym];
   if (!info) return res.status(404).json({ success: false, error: 'Stock not found' });
 
+  // Fetch price from Upstox
   const result = await upstoxFetch('/market-quote/quotes', { instrument_key: `NSE_EQ|${info.isin}` });
-  if (!result?.data) return res.json({ success: false, error: 'API error' });
+  const val = result?.data ? Object.values(result.data)[0] : null;
 
-  const val = Object.values(result.data)[0];
-  if (!val) return res.json({ success: false, error: 'No data' });
+  // Fetch fundamentals from Yahoo Finance
+  const yahoo = await fetchYahooFundamentals(sym);
+
+  const priceData = val ? {
+    price: val.last_price || 0, change: val.net_change || 0, changePct: val.percentage_change || 0,
+    open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0,
+    prevClose: val.ohlc?.close || 0, volume: val.volume || 0,
+    avgPrice: val.average_price || 0,
+    upperCircuit: val.upper_circuit_limit || 0, lowerCircuit: val.lower_circuit_limit || 0,
+    totalBuyQty: val.total_buy_quantity || 0, totalSellQty: val.total_sell_quantity || 0,
+  } : { price: 0 };
 
   res.json({
     success: true,
     data: {
       symbol: sym, name: info.name, sector: info.sector, industry: info.industry,
-      price: val.last_price || 0, change: val.net_change || 0, changePct: val.percentage_change || 0,
-      open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0, prevClose: val.ohlc?.close || 0,
-      volume: val.volume || 0, avgPrice: val.average_price || 0,
-      upperCircuit: val.upper_circuit_limit || 0, lowerCircuit: val.lower_circuit_limit || 0,
-      totalBuyQty: val.total_buy_quantity || 0, totalSellQty: val.total_sell_quantity || 0,
+      ...priceData,
+      fundamentals: yahoo || null,
+      dataSource: { price: 'Upstox', fundamentals: yahoo ? 'Yahoo Finance' : 'Unavailable' }
     }
   });
 });
@@ -264,17 +344,16 @@ app.get('/api/search', (req, res) => {
   res.json({ success: true, data: results });
 });
 
-// ── SCREENER ──
+// ── SCREENER (real prices + Yahoo fundamentals where available) ──
 app.get('/api/screener', withCache('screener', 30000, async () => {
-  // Use cached market data if available, otherwise fetch
+  // Get live prices
   let liveData = cache.market?.data || {};
   const hasLive = Object.values(liveData).some(s => s.price > 0);
-
   if (!hasLive) {
     const symbols = Object.keys(STOCKS);
     for (let i = 0; i < symbols.length; i += 10) {
       const batch = symbols.slice(i, i + 10);
-      const keys = batch.map(s => instKey(s)).filter(Boolean).join(',');
+      const keys = batch.map(s => `NSE_EQ|${STOCKS[s].isin}`).join(',');
       const result = await upstoxFetch('/market-quote/quotes', { instrument_key: keys });
       if (result?.data) {
         for (const [rawKey, val] of Object.entries(result.data)) {
@@ -287,62 +366,54 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
     }
   }
 
+  // Trigger background Yahoo fetch if not done
+  if (Object.keys(yahooCache).length < Object.keys(STOCKS).length) {
+    backgroundFetchFundamentals();
+  }
+
   return Object.entries(STOCKS).map(([sym, info]) => {
     const live = liveData[sym] || {};
-    const price = live.price || 0;
-    const changePct = live.changePct || 0;
-    const volume = live.volume || 0;
-
-    const seed = sym.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-    const rng = (min, max, off = 0) => {
-      const x = Math.sin(seed * 9301 + off * 49297) * 10000;
-      return +(min + (x - Math.floor(x)) * (max - min)).toFixed(2);
-    };
-
-    const sd = {
-      Technology: { pe:[22,45], pb:[5,15], roe:[18,35], mg:[15,28], de:[0,0.3], dv:[0.3,1.5] },
-      Financial:  { pe:[10,25], pb:[1.5,4], roe:[12,22], mg:[20,40], de:[0.5,4], dv:[0.5,2] },
-      Energy:     { pe:[8,18], pb:[1,3], roe:[10,20], mg:[8,18], de:[0.3,1.5], dv:[2,5] },
-      Healthcare: { pe:[20,40], pb:[3,10], roe:[15,30], mg:[12,25], de:[0,0.5], dv:[0.5,2] },
-      'Consumer Defensive': { pe:[35,70], pb:[8,25], roe:[20,45], mg:[10,22], de:[0,0.4], dv:[1,3] },
-      'Consumer Cyclical':  { pe:[15,35], pb:[3,10], roe:[12,25], mg:[8,18], de:[0.2,1.2], dv:[0.5,2] },
-      'Basic Materials':    { pe:[8,20], pb:[1,4], roe:[10,22], mg:[8,20], de:[0.3,1.5], dv:[1,4] },
-      Industrials:          { pe:[15,35], pb:[2,8], roe:[12,22], mg:[8,15], de:[0.3,1.5], dv:[0.5,2] },
-      Utilities:            { pe:[10,20], pb:[1.5,4], roe:[10,18], mg:[15,30], de:[1,3], dv:[2,5] },
-      Communication:        { pe:[15,30], pb:[3,8], roe:[10,20], mg:[10,20], de:[0.5,2], dv:[0.5,2] },
-    }[info.sector] || { pe:[15,30], pb:[2,6], roe:[12,22], mg:[10,20], de:[0.3,1.5], dv:[0.5,2] };
-
-    const pe = rng(sd.pe[0], sd.pe[1], 1);
-    const pb = rng(sd.pb[0], sd.pb[1], 5);
-    const roe = rng(sd.roe[0], sd.roe[1], 7);
-    const netMargin = rng(sd.mg[0], sd.mg[1], 12);
-    const dividend = rng(sd.dv[0], sd.dv[1], 13);
+    const yahoo = yahooCache[sym]?.data || {};
 
     return {
       symbol: sym, name: info.name, sector: info.sector, industry: info.industry,
-      exchange: 'NSE', country: 'India', mcap: 'Large',
-      price, change: live.change || 0, changePct, volume, avgVolume: Math.floor(rng(500000,15000000,22)),
-      open: live.open || 0, high: live.high || 0, low: live.low || 0, prevClose: live.prevClose || 0,
-      pe, fwdPe: rng(sd.pe[0]*0.8, sd.pe[1]*0.9, 2), peg: rng(0.5,2.5,3), ps: rng(1,10,4), pb,
-      evEbitda: rng(8,25,6), eps: price > 0 ? +(price/pe).toFixed(2) : 0,
-      roe, roa: rng(sd.roe[0]*0.4, sd.roe[1]*0.6, 8), debtEquity: rng(sd.de[0], sd.de[1], 9),
-      grossMargin: rng(sd.mg[0]+15, sd.mg[1]+20, 10), operatingMargin: rng(sd.mg[0]+5, sd.mg[1]+8, 11),
-      netMargin, dividend,
-      marketCap: price > 0 ? +(price * rng(100,900,24) * 1000000).toFixed(0) : 0,
-      targetPrice: price > 0 ? +(price * rng(1.02,1.30,23)).toFixed(2) : 0,
-      rsi: rng(25,75,14), beta: rng(0.6,1.5,15),
-      sma20: price > 0 ? +(price * rng(0.96,1.04,16)).toFixed(2) : 0,
-      sma50: price > 0 ? +(price * rng(0.92,1.08,17)).toFixed(2) : 0,
-      sma200: price > 0 ? +(price * rng(0.82,1.18,18)).toFixed(2) : 0,
-      high52w: price > 0 ? +(price * rng(1.05,1.40,19)).toFixed(2) : 0,
-      low52w: price > 0 ? +(price * rng(0.60,0.92,20)).toFixed(2) : 0,
-      volatility: rng(1,5,21),
-      perf1w: rng(-5,5,25), perf1m: rng(-10,10,26), perf3m: rng(-15,15,27),
-      perf6m: rng(-20,25,28), perfYTD: rng(-15,30,29), perf1y: rng(-20,50,30),
-      gap: rng(-3,3,31), relVolume: rng(0.5,2.5,32),
-      pattern: ['Double Bottom','Head & Shoulders','Ascending Triangle','Channel Up','Wedge Down','Cup & Handle','None'][seed%7],
-      candlestick: ['Hammer','Doji','Engulfing','Morning Star','Spinning Top','Marubozu','None'][seed%7],
-      analystRec: ['Strong Buy','Buy','Hold','Sell','Strong Sell'][(seed*3)%5],
+      exchange: 'NSE', country: 'India',
+      // Real price data from Upstox
+      price: live.price || 0,
+      change: live.change || 0,
+      changePct: live.changePct || 0,
+      volume: live.volume || 0,
+      open: live.open || 0,
+      high: live.high || 0,
+      low: live.low || 0,
+      prevClose: live.prevClose || 0,
+      // Real fundamentals from Yahoo Finance (null = not yet loaded)
+      pe: yahoo.pe || null,
+      fwdPe: yahoo.fwdPe || null,
+      peg: yahoo.peg || null,
+      ps: yahoo.ps || null,
+      pb: yahoo.pb || null,
+      evEbitda: yahoo.evEbitda || null,
+      eps: yahoo.eps || null,
+      roe: yahoo.roe || null,
+      roa: yahoo.roa || null,
+      debtEquity: yahoo.debtEquity || null,
+      grossMargin: yahoo.grossMargin || null,
+      operatingMargin: yahoo.operatingMargin || null,
+      netMargin: yahoo.netMargin || null,
+      dividend: yahoo.dividend || null,
+      marketCap: yahoo.marketCap || null,
+      targetPrice: yahoo.targetPrice || null,
+      beta: yahoo.beta || null,
+      sma50: yahoo.sma50 || null,
+      sma200: yahoo.sma200 || null,
+      high52w: yahoo.high52w || null,
+      low52w: yahoo.low52w || null,
+      revenueGrowth: yahoo.revenueGrowth || null,
+      earningsGrowth: yahoo.earningsGrowth || null,
+      analystRec: yahoo.analystRec || null,
+      numAnalysts: yahoo.numAnalysts || null,
+      fundamentalsLoaded: !!yahoo.pe,
     };
   });
 }));
@@ -359,24 +430,30 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
   else if (STOCKS[ul]) instKeyOC = `NSE_EQ|${STOCKS[ul].isin}`;
   else return res.status(404).json({ success: false, error: 'Unknown underlying' });
 
+  // Get spot price
+  const spotR = await upstoxFetch('/market-quote/ltp', { instrument_key: instKeyOC });
+  const spotPrice = spotR?.data ? Object.values(spotR.data)[0]?.last_price || 0 : 0;
+
   // Try real option chain
   const params = { instrument_key: instKeyOC };
   if (expiry) params.expiry_date = expiry;
   const result = await upstoxFetch('/option/chain', params);
 
   if (result?.data && Array.isArray(result.data) && result.data.length > 0) {
-    const spotR = await upstoxFetch('/market-quote/ltp', { instrument_key: instKeyOC });
-    const spotPrice = spotR?.data ? Object.values(spotR.data)[0]?.last_price || 0 : 0;
-
     const strikes = result.data.map(item => ({
       strike_price: item.strike_price,
+      expiry: item.expiry || expiry,
       call: item.call_options ? {
         ltp: item.call_options.market_data?.ltp || 0,
         change: item.call_options.market_data?.net_change || 0,
         volume: item.call_options.market_data?.volume || 0,
         oi: item.call_options.market_data?.oi || 0,
         oi_change: item.call_options.market_data?.oi_change || 0,
-        iv: item.call_options.option_greeks?.iv || 0,
+        iv: item.call_options.option_greeks?.iv ? +(item.call_options.option_greeks.iv * 100).toFixed(2) : null,
+        delta: item.call_options.option_greeks?.delta ?? null,
+        gamma: item.call_options.option_greeks?.gamma ?? null,
+        theta: item.call_options.option_greeks?.theta ?? null,
+        vega: item.call_options.option_greeks?.vega ?? null,
       } : null,
       put: item.put_options ? {
         ltp: item.put_options.market_data?.ltp || 0,
@@ -384,48 +461,40 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
         volume: item.put_options.market_data?.volume || 0,
         oi: item.put_options.market_data?.oi || 0,
         oi_change: item.put_options.market_data?.oi_change || 0,
-        iv: item.put_options.option_greeks?.iv || 0,
+        iv: item.put_options.option_greeks?.iv ? +(item.put_options.option_greeks.iv * 100).toFixed(2) : null,
+        delta: item.put_options.option_greeks?.delta ?? null,
+        gamma: item.put_options.option_greeks?.gamma ?? null,
+        theta: item.put_options.option_greeks?.theta ?? null,
+        vega: item.put_options.option_greeks?.vega ?? null,
       } : null,
     }));
 
-    return res.json({ success: true, data: { underlying: ul, spot_price: spotPrice, expiry: expiry || 'next', strikes }, live: true });
-  }
+    // Get expiry dates from data
+    const expiries = [...new Set(result.data.map(d => d.expiry).filter(Boolean))].sort();
 
-  // Fallback: simulated option chain
-  let spot = 0;
-  const spotR2 = await upstoxFetch('/market-quote/ltp', { instrument_key: instKeyOC });
-  if (spotR2?.data) spot = Object.values(spotR2.data)[0]?.last_price || 0;
-  if (!spot) {
-    if (ul.includes('NIFTY') && !ul.includes('BANK') && !ul.includes('FIN')) spot = 25800;
-    else if (ul.includes('BANK')) spot = 55000;
-    else if (ul.includes('FIN')) spot = 24000;
-    else spot = 2000;
-  }
-
-  const step = spot > 10000 ? 100 : spot > 1000 ? 50 : 25;
-  const atm = Math.round(spot / step) * step;
-  const strikes = [];
-  for (let i = -12; i <= 12; i++) {
-    const strike = atm + i * step;
-    const itmC = Math.max(0, spot - strike);
-    const itmP = Math.max(0, strike - spot);
-    const tv = spot * 0.018 * Math.exp(-Math.abs(i) * 0.25);
-    strikes.push({
-      strike_price: strike,
-      call: { ltp: +(itmC+tv+Math.random()*3).toFixed(2), change: +((Math.random()-0.5)*12).toFixed(2), volume: Math.floor(Math.random()*200000)+500, oi: Math.floor(Math.random()*1000000)+2000, oi_change: Math.floor((Math.random()-0.3)*60000), iv: +(11+Math.abs(i)*0.7+Math.random()*2).toFixed(2) },
-      put: { ltp: +(itmP+tv+Math.random()*3).toFixed(2), change: +((Math.random()-0.5)*12).toFixed(2), volume: Math.floor(Math.random()*200000)+500, oi: Math.floor(Math.random()*1000000)+2000, oi_change: Math.floor((Math.random()-0.3)*60000), iv: +(11+Math.abs(i)*0.7+Math.random()*2).toFixed(2) },
+    return res.json({
+      success: true,
+      data: { underlying: ul, spot_price: spotPrice, expiry: expiry || expiries[0] || 'next', expiries, strikes },
+      live: true,
+      dataSource: 'Upstox'
     });
   }
 
-  const expiries = [];
-  let d = new Date();
-  for (let c = 0; c < 4; c++) {
-    d.setDate(d.getDate() + ((4 - d.getDay() + 7) % 7 || 7));
-    expiries.push(d.toISOString().split('T')[0]);
-    d = new Date(d); d.setDate(d.getDate() + 1);
-  }
+  // No option chain available
+  return res.json({
+    success: false,
+    error: 'Option chain not available for this instrument',
+    spot_price: spotPrice
+  });
+});
 
-  res.json({ success: true, data: { underlying: ul, spot_price: spot, expiry: expiry || expiries[0], expiries, strikes }, simulated: true });
+// ── RATING TRACKER (Coming Soon) ──
+app.get('/api/ratings', (req, res) => {
+  res.json({
+    success: true,
+    status: 'coming_soon',
+    message: 'Rating Tracker is under development. Real analyst rating data will be integrated soon.'
+  });
 });
 
 // ── MARKET STATUS ──
@@ -451,8 +520,15 @@ app.get('/api/stocks-list', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// STARTUP
+// ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`ZerohedgeQuant API v4.0 on port ${PORT}`);
+  console.log(`ZerohedgeQuant API v5.0 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
-  console.log(`Sample key: NSE_EQ|${STOCKS.RELIANCE.isin}`);
+
+  // Start background Yahoo Finance fetch after 5 seconds
+  setTimeout(() => {
+    console.log('[Startup] Starting Yahoo Finance background fetch...');
+    backgroundFetchFundamentals();
+  }, 5000);
 });
