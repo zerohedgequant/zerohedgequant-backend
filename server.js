@@ -520,11 +520,66 @@ app.get('/api/stocks-list', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// UPSTOX AUTH — one-tap daily token refresh
+// Visit /auth/login each morning; token updates in place.
+// ═══════════════════════════════════════════════════════
+const AUTH = {
+  apiKey: process.env.UPSTOX_API_KEY || '',
+  apiSecret: process.env.UPSTOX_API_SECRET || '',
+  redirectUri: process.env.UPSTOX_REDIRECT_URI ||
+    'https://zerohedgequant-backend.onrender.com/auth/callback',
+  updatedAt: process.env.UPSTOX_ACCESS_TOKEN ? 'from env at boot' : null
+};
+
+app.get('/auth/login', (req, res) => {
+  if (!AUTH.apiKey) return res.status(500).send('UPSTOX_API_KEY not set on server');
+  const url =
+    'https://api.upstox.com/v2/login/authorization/dialog' +
+    `?response_type=code&client_id=${encodeURIComponent(AUTH.apiKey)}` +
+    `&redirect_uri=${encodeURIComponent(AUTH.redirectUri)}`;
+  res.redirect(url);
+});
+
+app.get('/auth/callback', async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code) return res.status(400).send('No auth code returned by Upstox');
+    const body = new URLSearchParams({
+      code,
+      client_id: AUTH.apiKey,
+      client_secret: AUTH.apiSecret,
+      redirect_uri: AUTH.redirectUri,
+      grant_type: 'authorization_code'
+    });
+    const r = await axios.post(
+      'https://api.upstox.com/v2/login/authorization/token',
+      body.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' } }
+    );
+    if (!r.data || !r.data.access_token) throw new Error('No access_token in response');
+    CONFIG.accessToken = r.data.access_token;   // live swap — no restart needed
+    AUTH.updatedAt = new Date().toISOString();
+    res.send(
+      '<body style="font-family:monospace;background:#0a0f1e;color:#2dd482;display:grid;place-items:center;height:90vh">' +
+      '<div><h2>&#10003; AlphaHedgeQuant token refreshed</h2>' +
+      `<p style="color:#8a94a8">Valid until ~3:30 AM IST tomorrow. Updated: ${AUTH.updatedAt}</p></div></body>`
+    );
+  } catch (e) {
+    res.status(500).send('Token exchange failed: ' + (e.response?.data?.errors?.[0]?.message || e.message));
+  }
+});
+
+app.get('/auth/status', (req, res) => {
+  res.json({ tokenSet: !!CONFIG.accessToken, updatedAt: AUTH.updatedAt });
+});
+
+// ═══════════════════════════════════════════════════════
 // STARTUP
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`ZerohedgeQuant API v5.0 (Production) on port ${PORT}`);
+  console.log(`AlphaHedgeQuant API v5.2 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
+  console.log(`Daily token login: /auth/login`);
 
   // Start background Yahoo Finance fetch after 5 seconds
   setTimeout(() => {
