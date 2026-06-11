@@ -208,6 +208,76 @@ async function fetchYahooFundamentals(symbol) {
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// EXPANDED UNIVERSES (v6) — US large caps + NSE additions
+// All served via Yahoo Finance (delayed ~15min). Wrong/renamed
+// tickers simply return no data and are dropped — graceful.
+// ═══════════════════════════════════════════════════════
+const US_STOCKS = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V","UNH","XOM","LLY","JNJ","PG","MA","HD","AVGO","CVX","MRK","ABBV","COST","PEP","KO","ADBE","WMT","CRM","BAC","TMO","MCD","CSCO","ACN","NFLX","AMD","LIN","ABT","ORCL","DHR","DIS","WFC","TXN","PM","VZ","INTU","CAT","NEE","UNP","IBM","AMGN","GE","COP","NKE","QCOM","HON","SPGI","LOW","RTX","BA","INTC","UPS","T","GS","SBUX","ELV","PLD","MS","BLK","DE","MDT","BMY","AXP","TJX","GILD","ADP","LMT","SYK","MDLZ","C","VRTX","ISRG","CB","MMC","AMT","REGN","SCHW","ZTS","SO","CI","PGR","MO","BSX","DUK","CL","EOG","ITW","NOC","SLB","BDX","CME","PYPL","UBER","PLTR","ABNB","SNOW","COIN","SHOP","ARM","SMCI","MU","PANW","CRWD","SPOT","HOOD","DELL","ANET","KLAC","LRCX","AMAT","MRVL","NOW","SNPS","CDNS","FTNT","WDAY","TEAM","DDOG","NET","ZS","MDB","TTD","ROKU","DKNG","RBLX","CMG","LULU","MAR","BKNG","DAL","UAL","F","GM","RIVN","LCID"];
+
+const NSE_EXTRA = ["TRENT","BEL","HAL","DLF","VBL","PIDILITIND","GODREJCP","DABUR","MARICO","COLPAL","BERGEPAINT","HAVELLS","SIEMENS","ABB","BOSCHLTD","CUMMINSIND","ASHOKLEY","TVSMOTOR","BAJAJ-AUTO","HEROMOTOCO","EICHERMOT","MOTHERSON","BHARATFORG","APOLLOHOSP","MAXHEALTH","FORTIS","LUPIN","AUROPHARMA","TORNTPHARM","ZYDUSLIFE","ALKEM","GLENMARK","BIOCON","SYNGENE","NAUKRI","IRCTC","INDIGO","PNB","BANKBARODA","CANBK","UNIONBANK","IDFCFIRSTB","FEDERALBNK","AUBANK","CHOLAFIN","SHRIRAMFIN","MUTHOOTFIN","LICHSGFIN","RECLTD","PFC","IRFC","SAIL","NMDC","VEDL","HINDZINC","JINDALSTEL","NATIONALUM","TATAELXSI","PERSISTENT","COFORGE","MPHASIS","LTIM","OFSS","KPITTECH","TATACOMM","INDUSTOWER","IDEA"];
+
+const yqCache = {}; // { "MKT:SYM": { data, ts } }
+const YQ_TTL = 15 * 60 * 1000;
+
+async function fetchYahooQuoteFull(symbol, market) {
+  const key = `${market}:${symbol}`;
+  const cached = yqCache[key];
+  if (cached && Date.now() - cached.ts < YQ_TTL) return cached.data;
+  const ySym = market === 'IN' ? symbol.replace('&', '%26') + '.NS' : symbol;
+  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ySym}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile`;
+  try {
+    const resp = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': 'application/json' },
+      timeout: 9000
+    });
+    const r = resp.data?.quoteSummary?.result?.[0];
+    if (!r) return null;
+    const x = (o) => o?.raw ?? null;
+    const pr = r.price || {}, sd = r.summaryDetail || {}, ks = r.defaultKeyStatistics || {}, fd = r.financialData || {}, ap = r.assetProfile || {};
+    const pc = (o) => (x(o) != null ? +(x(o) * 100).toFixed(2) : null);
+    const data = {
+      name: pr.longName || pr.shortName || symbol,
+      sector: ap.sector || '-', industry: ap.industry || '-',
+      price: x(pr.regularMarketPrice) || 0,
+      change: x(pr.regularMarketChange) || 0,
+      changePct: x(pr.regularMarketChangePercent) != null ? +(x(pr.regularMarketChangePercent) * 100).toFixed(2) : 0,
+      volume: x(pr.regularMarketVolume) || 0,
+      open: x(pr.regularMarketOpen) || 0,
+      prevClose: x(pr.regularMarketPreviousClose) || 0,
+      marketCap: x(pr.marketCap),
+      pe: x(sd.trailingPE), fwdPe: x(ks.forwardPE), peg: x(ks.pegRatio),
+      ps: x(sd.priceToSalesTrailing12Months), pb: x(ks.priceToBook), evEbitda: x(ks.enterpriseToEbitda),
+      eps: x(ks.trailingEps) ?? x(sd.trailingEps),
+      roe: pc(fd.returnOnEquity), roa: pc(fd.returnOnAssets),
+      debtEquity: x(fd.debtToEquity) != null ? +(x(fd.debtToEquity) / 100).toFixed(2) : null,
+      grossMargin: pc(fd.grossMargins), operatingMargin: pc(fd.operatingMargins), netMargin: pc(fd.profitMargins),
+      dividend: pc(sd.dividendYield),
+      beta: x(sd.beta) ?? x(ks.beta),
+      sma50: x(sd.fiftyDayAverage), sma200: x(sd.twoHundredDayAverage),
+      high52w: x(sd.fiftyTwoWeekHigh), low52w: x(sd.fiftyTwoWeekLow),
+      targetPrice: x(fd.targetMeanPrice),
+      revenueGrowth: pc(fd.revenueGrowth), earningsGrowth: pc(fd.earningsGrowth)
+    };
+    yqCache[key] = { data, ts: Date.now() };
+    return data;
+  } catch (err) {
+    console.error(`[YahooQ ${market}:${symbol}] ${err.response?.status || err.message}`);
+    return null;
+  }
+}
+
+// Fetch any missing/stale symbols in parallel batches
+async function ensureYahooBatch(symbols, market, parallel = 8) {
+  const missing = symbols.filter((s) => {
+    const c = yqCache[`${market}:${s}`];
+    return !c || Date.now() - c.ts > YQ_TTL;
+  });
+  for (let i = 0; i < missing.length; i += parallel) {
+    await Promise.all(missing.slice(i, i + parallel).map((s) => fetchYahooQuoteFull(s, market)));
+  }
+}
+
 // Background: fetch fundamentals for all stocks gradually
 let yahooFetchInProgress = false;
 async function backgroundFetchFundamentals() {
@@ -222,6 +292,12 @@ async function backgroundFetchFundamentals() {
     await new Promise(r => setTimeout(r, 500)); // Rate limit: 2 req/sec
   }
   console.log(`[Yahoo] Background fetch done. ${count} stocks updated.`);
+  // v6: refresh expanded universes (quotes + fundamentals via Yahoo)
+  try {
+    await ensureYahooBatch(NSE_EXTRA, 'IN', 6);
+    await ensureYahooBatch(US_STOCKS, 'US', 6);
+    console.log(`[YahooQ] Universe refresh done. IN+:${NSE_EXTRA.length} US:${US_STOCKS.length}`);
+  } catch (e) { console.error('[YahooQ] universe refresh error', e.message); }
   yahooFetchInProgress = false;
 }
 
@@ -377,7 +453,7 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
     backgroundFetchFundamentals();
   }
 
-  return Object.entries(STOCKS).map(([sym, info]) => {
+  const coreRows = Object.entries(STOCKS).map(([sym, info]) => {
     const live = liveData[sym] || {};
     const yahoo = yahooCache[sym]?.data || {};
 
@@ -422,6 +498,16 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
       fundamentalsLoaded: !!yahoo.pe,
     };
   });
+
+  // v6: expanded NSE names served via Yahoo (delayed)
+  const extraRows = NSE_EXTRA.map((sym) => {
+    const y = yqCache[`IN:${sym}`]?.data;
+    if (!y || !y.price) return null;
+    return { symbol: sym, exchange: 'NSE', country: 'India', src: 'yahoo', ...y };
+  }).filter(Boolean);
+  ensureYahooBatch(NSE_EXTRA, 'IN').catch(() => {});
+
+  return [...coreRows, ...extraRows];
 }));
 
 // ── OPTION CHAIN ──
@@ -526,6 +612,45 @@ app.get('/api/stocks-list', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// US MARKET (v6) — Yahoo Finance, ~15min delayed
+// ═══════════════════════════════════════════════════════
+app.get('/api/us-screener', withCache('us_screener', 60000, async () => {
+  await ensureYahooBatch(US_STOCKS, 'US', 8);
+  return US_STOCKS.map((sym) => {
+    const y = yqCache[`US:${sym}`]?.data;
+    if (!y || !y.price) return null;
+    return { symbol: sym, exchange: 'US', country: 'USA', src: 'yahoo', ...y };
+  }).filter(Boolean);
+}));
+
+const US_INDICES = [
+  { key: '^GSPC', label: 'S&P 500' },
+  { key: '^IXIC', label: 'NASDAQ' },
+  { key: '^DJI', label: 'DOW JONES' },
+  { key: '^VIX', label: 'VIX' }
+];
+app.get('/api/us-indices', withCache('us_indices', 60000, async () => {
+  const out = {};
+  await Promise.all(US_INDICES.map(async (idx) => {
+    try {
+      const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(idx.key)}?modules=price`;
+      const resp = await axios.get(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': 'application/json' },
+        timeout: 8000
+      });
+      const pr = resp.data?.quoteSummary?.result?.[0]?.price;
+      if (!pr) return;
+      out[idx.label] = {
+        value: pr.regularMarketPrice?.raw || 0,
+        change: pr.regularMarketChange?.raw || 0,
+        changePct: pr.regularMarketChangePercent?.raw != null ? +(pr.regularMarketChangePercent.raw * 100).toFixed(2) : 0
+      };
+    } catch (e) { console.error(`[US idx ${idx.key}] ${e.message}`); }
+  }));
+  return out;
+}));
+
+// ═══════════════════════════════════════════════════════
 // UPSTOX AUTH — one-tap daily token refresh
 // Visit /auth/login each morning; token updates in place.
 // ═══════════════════════════════════════════════════════
@@ -584,9 +709,10 @@ app.get('/auth/status', (req, res) => {
 // STARTUP
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`AlphaHedgeQuant API v5.3 (Production) on port ${PORT}`);
+  console.log(`AlphaHedgeQuant API v6.0 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
   console.log(`Daily token login: /auth/login`);
+  console.log(`Universes: NSE ${Object.keys(STOCKS).length}+${NSE_EXTRA.length} | US ${US_STOCKS.length}`);
 
   setTimeout(() => {
     console.log('[Startup] Starting Yahoo Finance background fetch...');
