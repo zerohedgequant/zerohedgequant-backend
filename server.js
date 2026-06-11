@@ -143,13 +143,7 @@ async function fetchYahooFundamentals(symbol) {
   const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSym}?modules=price,summaryDetail,defaultKeyStatistics,financialData`;
 
   try {
-    const resp = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
-      },
-      timeout: 8000
-    });
+    const resp = await yahooGet(url);
 
     const result = resp.data?.quoteSummary?.result?.[0];
     if (!result) return null;
@@ -217,6 +211,57 @@ const US_STOCKS = ["AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JP
 
 const NSE_EXTRA = ["TRENT","BEL","HAL","DLF","VBL","PIDILITIND","GODREJCP","DABUR","MARICO","COLPAL","BERGEPAINT","HAVELLS","SIEMENS","ABB","BOSCHLTD","CUMMINSIND","ASHOKLEY","TVSMOTOR","BAJAJ-AUTO","HEROMOTOCO","EICHERMOT","MOTHERSON","BHARATFORG","APOLLOHOSP","MAXHEALTH","FORTIS","LUPIN","AUROPHARMA","TORNTPHARM","ZYDUSLIFE","ALKEM","GLENMARK","BIOCON","SYNGENE","NAUKRI","IRCTC","INDIGO","PNB","BANKBARODA","CANBK","UNIONBANK","IDFCFIRSTB","FEDERALBNK","AUBANK","CHOLAFIN","SHRIRAMFIN","MUTHOOTFIN","LICHSGFIN","RECLTD","PFC","IRFC","SAIL","NMDC","VEDL","HINDZINC","JINDALSTEL","NATIONALUM","TATAELXSI","PERSISTENT","COFORGE","MPHASIS","LTIM","OFSS","KPITTECH","TATACOMM","INDUSTOWER","IDEA"];
 
+// Yahoo session: cookie + crumb (required since 2023 for quoteSummary)
+const ySession = { cookie: null, crumb: null, ts: 0 };
+const Y_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+async function getYahooSession(force = false) {
+  if (!force && ySession.crumb && Date.now() - ySession.ts < 6 * 60 * 60 * 1000) return ySession;
+  try {
+    const r1 = await axios.get('https://fc.yahoo.com', {
+      headers: { 'User-Agent': Y_UA }, timeout: 8000,
+      validateStatus: () => true   // fc.yahoo.com returns 404 but sets the cookie
+    });
+    const setCookie = r1.headers['set-cookie'];
+    if (setCookie && setCookie.length) {
+      ySession.cookie = setCookie.map((c) => c.split(';')[0]).join('; ');
+    }
+    const r2 = await axios.get('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+      headers: { 'User-Agent': Y_UA, 'Cookie': ySession.cookie || '' }, timeout: 8000
+    });
+    if (typeof r2.data === 'string' && r2.data.length < 30) {
+      ySession.crumb = r2.data;
+      ySession.ts = Date.now();
+      console.log('[Yahoo] session crumb acquired');
+    }
+  } catch (e) {
+    console.error('[Yahoo] session error:', e.message);
+  }
+  return ySession;
+}
+
+async function yahooGet(url) {
+  const s = await getYahooSession();
+  const sep = url.includes('?') ? '&' : '?';
+  const full = s.crumb ? `${url}${sep}crumb=${encodeURIComponent(s.crumb)}` : url;
+  try {
+    return await axios.get(full, {
+      headers: { 'User-Agent': Y_UA, 'Accept': 'application/json', 'Cookie': s.cookie || '' },
+      timeout: 9000
+    });
+  } catch (err) {
+    if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+      const s2 = await getYahooSession(true);   // refresh session once and retry
+      const full2 = s2.crumb ? `${url}${sep}crumb=${encodeURIComponent(s2.crumb)}` : url;
+      return axios.get(full2, {
+        headers: { 'User-Agent': Y_UA, 'Accept': 'application/json', 'Cookie': s2.cookie || '' },
+        timeout: 9000
+      });
+    }
+    throw err;
+  }
+}
+
 const yqCache = {}; // { "MKT:SYM": { data, ts } }
 const YQ_TTL = 15 * 60 * 1000;
 
@@ -227,10 +272,7 @@ async function fetchYahooQuoteFull(symbol, market) {
   const ySym = market === 'IN' ? symbol.replace('&', '%26') + '.NS' : symbol;
   const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ySym}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile`;
   try {
-    const resp = await axios.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': 'application/json' },
-      timeout: 9000
-    });
+    const resp = await yahooGet(url);
     const r = resp.data?.quoteSummary?.result?.[0];
     if (!r) return null;
     const x = (o) => o?.raw ?? null;
@@ -634,10 +676,7 @@ app.get('/api/us-indices', withCache('us_indices', 60000, async () => {
   await Promise.all(US_INDICES.map(async (idx) => {
     try {
       const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(idx.key)}?modules=price`;
-      const resp = await axios.get(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Accept': 'application/json' },
-        timeout: 8000
-      });
+      const resp = await yahooGet(url);
       const pr = resp.data?.quoteSummary?.result?.[0]?.price;
       if (!pr) return;
       out[idx.label] = {
@@ -709,7 +748,7 @@ app.get('/auth/status', (req, res) => {
 // STARTUP
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`AlphaHedgeQuant API v6.0 (Production) on port ${PORT}`);
+  console.log(`AlphaHedgeQuant API v6.1 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
   console.log(`Daily token login: /auth/login`);
   console.log(`Universes: NSE ${Object.keys(STOCKS).length}+${NSE_EXTRA.length} | US ${US_STOCKS.length}`);
