@@ -87,6 +87,40 @@ async function upstoxFetch(endpoint, params = {}) {
   }
 }
 
+// Fetch quotes one instrument at a time (batched commas break Upstox URL encoding)
+async function fetchQuotesIndividually(symbols, parallel = 5) {
+  const out = {};
+  for (let i = 0; i < symbols.length; i += parallel) {
+    const batch = symbols.slice(i, i + parallel);
+    const results = await Promise.all(batch.map(async (sym) => {
+      const url = `${CONFIG.baseUrl}/market-quote/quotes?instrument_key=NSE_EQ%7C${STOCKS[sym].isin}`;
+      try {
+        const r = await axios.get(url, {
+          headers: { 'Authorization': `Bearer ${CONFIG.accessToken}`, 'Accept': 'application/json' },
+          timeout: 12000
+        });
+        return { sym, val: r.data?.data ? Object.values(r.data.data)[0] : null };
+      } catch (err) {
+        console.error(`[Upstox quote ${sym}] ${err.response?.status}: ${err.response?.data?.errors?.[0]?.message || err.message}`);
+        return { sym, val: null };
+      }
+    }));
+    for (const { sym, val } of results) {
+      if (!val || !val.last_price) continue;
+      const prevClose = val.ohlc?.close || 0;
+      let pct = val.percentage_change || 0;
+      if (!pct && prevClose) pct = +(((val.last_price - prevClose) / prevClose) * 100).toFixed(2);
+      out[sym] = {
+        price: val.last_price, change: val.net_change || (prevClose ? +(val.last_price - prevClose).toFixed(2) : 0),
+        changePct: pct, volume: val.volume || 0,
+        open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0, prevClose
+      };
+    }
+    if (i + parallel < symbols.length) await new Promise(r => setTimeout(r, 300));
+  }
+  return out;
+}
+
 function matchSymbol(rawKey, batch) {
   for (const sym of batch) {
     if (rawKey.includes(STOCKS[sym].isin)) return sym;
@@ -248,10 +282,13 @@ app.get('/api/indices', withCache('indices', 10000, async () => {
     if (result?.data) {
       const val = Object.values(result.data)[0];
       if (val) {
+        const pc = val.ohlc?.close || 0;
+        let ipct = val.percentage_change || 0;
+        if (!ipct && pc && val.last_price) ipct = +((((val.last_price - pc) / pc) * 100)).toFixed(2);
         out[idx.label] = {
           value: val.last_price || 0,
-          change: val.net_change || 0,
-          changePct: val.percentage_change || 0,
+          change: val.net_change || (pc && val.last_price ? +(val.last_price - pc).toFixed(2) : 0),
+          changePct: ipct,
           open: val.ohlc?.open || 0,
           high: val.ohlc?.high || 0,
           low: val.ohlc?.low || 0,
@@ -267,35 +304,17 @@ app.get('/api/indices', withCache('indices', 10000, async () => {
 // ── MARKET DATA ──
 app.get('/api/market-data', withCache('market', 15000, async () => {
   const symbols = Object.keys(STOCKS);
+  const live = await fetchQuotesIndividually(symbols);
   const allData = {};
   let liveCount = 0;
-
-  for (let i = 0; i < symbols.length; i += 10) {
-    const batch = symbols.slice(i, i + 10);
-    const keys = batch.map(s => `NSE_EQ|${STOCKS[s].isin}`).join(',');
-    const result = await upstoxFetch('/market-quote/quotes', { instrument_key: keys });
-    if (result?.data) {
-      for (const [rawKey, val] of Object.entries(result.data)) {
-        if (!val || !val.last_price) continue;
-        const sym = matchSymbol(rawKey, batch);
-        if (sym) {
-          allData[sym] = {
-            symbol: sym, name: STOCKS[sym].name, sector: STOCKS[sym].sector, industry: STOCKS[sym].industry,
-            price: val.last_price, change: val.net_change || 0, changePct: val.percentage_change || 0,
-            open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0,
-            prevClose: val.ohlc?.close || 0, volume: val.volume || 0,
-          };
-          liveCount++;
-        }
-      }
-    }
-    if (i + 10 < symbols.length) await new Promise(r => setTimeout(r, 400));
-  }
-
   for (const [sym, info] of Object.entries(STOCKS)) {
-    if (!allData[sym]) allData[sym] = { symbol: sym, name: info.name, sector: info.sector, industry: info.industry, price: 0, change: 0, changePct: 0, volume: 0 };
+    if (live[sym]) {
+      allData[sym] = { symbol: sym, name: info.name, sector: info.sector, industry: info.industry, ...live[sym] };
+      liveCount++;
+    } else {
+      allData[sym] = { symbol: sym, name: info.name, sector: info.sector, industry: info.industry, price: 0, change: 0, changePct: 0, volume: 0 };
+    }
   }
-
   console.log(`[Market] ${liveCount}/${symbols.length} live`);
   return allData;
 }));
@@ -350,20 +369,7 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
   let liveData = cache.market?.data || {};
   const hasLive = Object.values(liveData).some(s => s.price > 0);
   if (!hasLive) {
-    const symbols = Object.keys(STOCKS);
-    for (let i = 0; i < symbols.length; i += 10) {
-      const batch = symbols.slice(i, i + 10);
-      const keys = batch.map(s => `NSE_EQ|${STOCKS[s].isin}`).join(',');
-      const result = await upstoxFetch('/market-quote/quotes', { instrument_key: keys });
-      if (result?.data) {
-        for (const [rawKey, val] of Object.entries(result.data)) {
-          if (!val) continue;
-          const sym = matchSymbol(rawKey, batch);
-          if (sym) liveData[sym] = { price: val.last_price, change: val.net_change, changePct: val.percentage_change, volume: val.volume, open: val.ohlc?.open, high: val.ohlc?.high, low: val.ohlc?.low, prevClose: val.ohlc?.close };
-        }
-      }
-      if (i + 10 < symbols.length) await new Promise(r => setTimeout(r, 400));
-    }
+    liveData = await fetchQuotesIndividually(Object.keys(STOCKS));
   }
 
   // Trigger background Yahoo fetch if not done
@@ -559,6 +565,7 @@ app.get('/auth/callback', async (req, res) => {
     if (!r.data || !r.data.access_token) throw new Error('No access_token in response');
     CONFIG.accessToken = r.data.access_token;   // live swap — no restart needed
     AUTH.updatedAt = new Date().toISOString();
+    cache.indices = null; cache.market = null; cache.screener = null;  // bust stale zero-price caches
     res.send(
       '<body style="font-family:monospace;background:#0a0f1e;color:#2dd482;display:grid;place-items:center;height:90vh">' +
       '<div><h2>&#10003; AlphaHedgeQuant token refreshed</h2>' +
@@ -577,11 +584,10 @@ app.get('/auth/status', (req, res) => {
 // STARTUP
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`AlphaHedgeQuant API v5.2 (Production) on port ${PORT}`);
+  console.log(`AlphaHedgeQuant API v5.3 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
   console.log(`Daily token login: /auth/login`);
 
-  // Start background Yahoo Finance fetch after 5 seconds
   setTimeout(() => {
     console.log('[Startup] Starting Yahoo Finance background fetch...');
     backgroundFetchFundamentals();
