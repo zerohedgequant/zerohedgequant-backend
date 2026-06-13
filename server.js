@@ -478,6 +478,90 @@ app.get('/api/stock/:symbol', async (req, res) => {
   });
 });
 
+// ── DEEP FUNDAMENTALS (Yahoo: ratios + earnings history + price series) ──
+const deepCache = {}; // { "MKT:SYM": { data, ts } }
+const DEEP_TTL = 30 * 60 * 1000;
+
+async function fetchYahooDeep(symbol, market) {
+  const sym = symbol.toUpperCase();
+  const ySym = market === 'US' ? sym : sym.replace('&', '%26') + '.NS';
+
+  // 1) quoteSummary — profile, ratios, earnings history
+  const qsUrl = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ySym}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile,earnings`;
+  // 2) chart — 1y weekly closes for the price chart
+  const chUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?range=1y&interval=1wk`;
+
+  const [qs, ch] = await Promise.allSettled([yahooGet(qsUrl), yahooGet(chUrl)]);
+  const ex = (o) => (o?.raw ?? o?.fmt ?? null);
+
+  let out = { symbol: sym, market, name: sym };
+
+  if (qs.status === 'fulfilled') {
+    const r = qs.value.data?.quoteSummary?.result?.[0] || {};
+    const pr = r.price || {}, sd = r.summaryDetail || {}, ks = r.defaultKeyStatistics || {},
+          fd = r.financialData || {}, ap = r.assetProfile || {}, ea = r.earnings || {};
+    out.name = pr.longName || pr.shortName || sym;
+    out.sector = ap.sector || null;
+    out.industry = ap.industry || null;
+    out.about = ap.longBusinessSummary || null;
+    out.price = ex(pr.regularMarketPrice);
+    out.changePct = ex(pr.regularMarketChangePercent) != null ? +(ex(pr.regularMarketChangePercent) * 100).toFixed(2) : null;
+    out.change = ex(pr.regularMarketChange);
+    out.open = ex(pr.regularMarketOpen); out.high = ex(pr.regularMarketDayHigh);
+    out.low = ex(pr.regularMarketDayLow); out.prevClose = ex(pr.regularMarketPreviousClose);
+    out.volume = ex(pr.regularMarketVolume);
+    out.fundamentals = {
+      marketCap: ex(pr.marketCap), pe: ex(sd.trailingPE), fwdPe: ex(sd.forwardPE),
+      pb: ex(ks.priceToBook), peg: ex(ks.pegRatio), ps: ex(sd.priceToSalesTrailing12Months),
+      evEbitda: ex(ks.enterpriseToEbitda), eps: ex(ks.trailingEps), bookValue: ex(ks.bookValue),
+      dividend: ex(sd.dividendYield) != null ? +(ex(sd.dividendYield) * 100).toFixed(2) : null,
+      roe: ex(fd.returnOnEquity) != null ? +(ex(fd.returnOnEquity) * 100).toFixed(2) : null,
+      roa: ex(fd.returnOnAssets) != null ? +(ex(fd.returnOnAssets) * 100).toFixed(2) : null,
+      grossMargin: ex(fd.grossMargins) != null ? +(ex(fd.grossMargins) * 100).toFixed(2) : null,
+      operatingMargin: ex(fd.operatingMargins) != null ? +(ex(fd.operatingMargins) * 100).toFixed(2) : null,
+      netMargin: ex(fd.profitMargins) != null ? +(ex(fd.profitMargins) * 100).toFixed(2) : null,
+      revenueGrowth: ex(fd.revenueGrowth) != null ? +(ex(fd.revenueGrowth) * 100).toFixed(2) : null,
+      earningsGrowth: ex(fd.earningsGrowth) != null ? +(ex(fd.earningsGrowth) * 100).toFixed(2) : null,
+      debtEquity: ex(fd.debtToEquity), currentRatio: ex(fd.currentRatio), beta: ex(sd.beta),
+      high52w: ex(sd.fiftyTwoWeekHigh), low52w: ex(sd.fiftyTwoWeekLow),
+      sma50: ex(sd.fiftyDayAverage), sma200: ex(sd.twoHundredDayAverage),
+      targetPrice: ex(fd.targetMeanPrice), numAnalysts: ex(fd.numberOfAnalystOpinions),
+      analystRec: fd.recommendationKey || null,
+    };
+    // earnings history -> [{label, revenue, profit}]
+    const yc = ea.financialsChart?.yearly || [];
+    out.annual = yc.map((x) => ({ label: String(ex(x.date) ?? ''), revenue: ex(x.revenue), profit: ex(x.earnings) }));
+    const qc = ea.financialsChart?.quarterly || [];
+    out.quarterly = qc.map((x) => ({ label: String(x.date ?? ''), revenue: ex(x.revenue), profit: ex(x.earnings) }));
+  }
+
+  // price series
+  if (ch.status === 'fulfilled') {
+    const c = ch.value.data?.chart?.result?.[0];
+    const ts = c?.timestamp || [];
+    const close = c?.indicators?.quote?.[0]?.close || [];
+    out.history = ts.map((t, i) => ({ t, c: close[i] })).filter((p) => p.c != null);
+  } else out.history = [];
+
+  return out;
+}
+
+app.get('/api/fundamentals/:symbol', async (req, res) => {
+  const sym = req.params.symbol.toUpperCase();
+  const market = req.query.market === 'US' ? 'US' : 'NSE';
+  const key = `${market}:${sym}`;
+  const cached = deepCache[key];
+  if (cached && Date.now() - cached.ts < DEEP_TTL) return res.json({ success: true, data: cached.data, cached: true });
+  try {
+    const data = await fetchYahooDeep(sym, market);
+    if (!data || data.price == null) return res.status(404).json({ success: false, error: 'No data' });
+    deepCache[key] = { data, ts: Date.now() };
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(502).json({ success: false, error: 'Yahoo fetch failed' });
+  }
+});
+
 // ── SEARCH ──
 app.get('/api/search', (req, res) => {
   const q = (req.query.q || '').toUpperCase().trim();
@@ -769,7 +853,7 @@ app.get('/auth/status', (req, res) => {
 // STARTUP
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`AlphaHedgeQuant API v7.0 (Production) on port ${PORT}`);
+  console.log(`AlphaHedgeQuant API v8.0 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
   console.log(`Daily token login: /auth/login`);
   console.log(`Universes: NSE ${Object.keys(STOCKS).length}+${NSE_EXTRA.length} | US ${US_STOCKS.length}`);
