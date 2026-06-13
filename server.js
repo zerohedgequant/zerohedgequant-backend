@@ -156,6 +156,14 @@ async function fetchYahooFundamentals(symbol) {
     const extract = (obj) => obj?.raw ?? obj?.fmt ?? null;
 
     const data = {
+      // Live-ish price (Yahoo) used as fallback when Upstox is post-market/0
+      yPrice: extract(pr.regularMarketPrice),
+      yChangePct: extract(pr.regularMarketChangePercent) != null ? +(extract(pr.regularMarketChangePercent) * 100).toFixed(2) : null,
+      yPrevClose: extract(pr.regularMarketPreviousClose),
+      yOpen: extract(pr.regularMarketOpen),
+      yHigh: extract(pr.regularMarketDayHigh),
+      yLow: extract(pr.regularMarketDayLow),
+      yVolume: extract(pr.regularMarketVolume),
       // Valuation
       pe: extract(sd.trailingPE),
       fwdPe: extract(ks.forwardPE),
@@ -499,18 +507,28 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
     const live = liveData[sym] || {};
     const yahoo = yahooCache[sym]?.data || {};
 
+    // Prefer live Upstox price; fall back to Yahoo when market is closed / Upstox returns 0.
+    const hasUpstox = (live.price || 0) > 0;
+    const price = hasUpstox ? live.price : (yahoo.yPrice || 0);
+    const changePct = hasUpstox ? (live.changePct || 0) : (yahoo.yChangePct ?? 0);
+    const prevClose = hasUpstox ? (live.prevClose || 0) : (yahoo.yPrevClose || 0);
+    const change = hasUpstox ? (live.change || 0)
+      : (yahoo.yPrice && yahoo.yPrevClose ? +(yahoo.yPrice - yahoo.yPrevClose).toFixed(2) : 0);
+    const priceSrc = hasUpstox ? 'Upstox' : (yahoo.yPrice ? 'Yahoo' : 'NA');
+
     return {
       symbol: sym, name: info.name, sector: info.sector, industry: info.industry,
       exchange: 'NSE', country: 'India',
-      // Real price data from Upstox
-      price: live.price || 0,
-      change: live.change || 0,
-      changePct: live.changePct || 0,
-      volume: live.volume || 0,
-      open: live.open || 0,
-      high: live.high || 0,
-      low: live.low || 0,
-      prevClose: live.prevClose || 0,
+      priceSrc,
+      // Live price (Upstox) with Yahoo fallback post-market
+      price,
+      change,
+      changePct,
+      volume: hasUpstox ? (live.volume || 0) : (yahoo.yVolume || 0),
+      open: hasUpstox ? (live.open || 0) : (yahoo.yOpen || 0),
+      high: hasUpstox ? (live.high || 0) : (yahoo.yHigh || 0),
+      low: hasUpstox ? (live.low || 0) : (yahoo.yLow || 0),
+      prevClose,
       // Real fundamentals from Yahoo Finance (null = not yet loaded)
       pe: yahoo.pe || null,
       fwdPe: yahoo.fwdPe || null,
@@ -541,15 +559,18 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
     };
   });
 
-  // v6: expanded NSE names served via Yahoo (delayed)
-  const extraRows = NSE_EXTRA.map((sym) => {
+  // v6: expanded NSE names served via Yahoo (delayed) — skip any already in core to avoid duplicates
+  const coreSet = new Set(Object.keys(STOCKS));
+  const extraRows = NSE_EXTRA.filter((sym) => !coreSet.has(sym)).map((sym) => {
     const y = yqCache[`IN:${sym}`]?.data;
     if (!y || !y.price) return null;
-    return { symbol: sym, exchange: 'NSE', country: 'India', src: 'yahoo', ...y };
+    return { symbol: sym, exchange: 'NSE', country: 'India', src: 'yahoo', priceSrc: 'Yahoo', ...y };
   }).filter(Boolean);
   ensureYahooBatch(NSE_EXTRA, 'IN').catch(() => {});
 
-  return [...coreRows, ...extraRows];
+  // Launch hygiene: never surface a row with no usable price.
+  const all = [...coreRows, ...extraRows].filter((r) => (r.price || 0) > 0);
+  return all;
 }));
 
 // ── OPTION CHAIN ──
@@ -748,7 +769,7 @@ app.get('/auth/status', (req, res) => {
 // STARTUP
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
-  console.log(`AlphaHedgeQuant API v6.1 (Production) on port ${PORT}`);
+  console.log(`AlphaHedgeQuant API v7.0 (Production) on port ${PORT}`);
   console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
   console.log(`Daily token login: /auth/login`);
   console.log(`Universes: NSE ${Object.keys(STOCKS).length}+${NSE_EXTRA.length} | US ${US_STOCKS.length}`);
