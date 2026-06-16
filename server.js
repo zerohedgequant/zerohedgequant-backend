@@ -1282,6 +1282,142 @@ app.post('/api/backtest', async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  AHQ RESEARCH LIBRARY — arXiv q-fin feed
+//  PASTE THIS BLOCK INTO server.js, ABOVE app.listen(...)
+//  Adds: GET /api/research/arxiv
+//  No new npm packages (uses the axios already imported at top of server.js)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// arXiv quantitative-finance subcategories
+const QFIN_CATEGORIES = {
+  all:    { label: "All q-fin",            query: "cat:q-fin.*" },
+  ST:     { label: "Statistics / Stat-arb", query: "cat:q-fin.ST" },
+  TR:     { label: "Trading & Microstructure", query: "cat:q-fin.TR" },
+  PM:     { label: "Portfolio Management",  query: "cat:q-fin.PM" },
+  RM:     { label: "Risk Management",       query: "cat:q-fin.RM" },
+  CP:     { label: "Computational Finance", query: "cat:q-fin.CP" },
+  PR:     { label: "Pricing of Securities", query: "cat:q-fin.PR" },
+  MF:     { label: "Mathematical Finance",  query: "cat:q-fin.MF" },
+  GN:     { label: "General Finance",       query: "cat:q-fin.GN" },
+  EC:     { label: "Economics",             query: "cat:q-fin.EC" },
+};
+
+// Tiny XML field extractor (arXiv returns Atom XML). Avoids adding an XML lib.
+function extractAll(xml, tag) {
+  const out = [];
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "g");
+  let m;
+  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  return out;
+}
+function extractOne(block, tag) {
+  const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
+  return m ? m[1].trim() : "";
+}
+function decodeEntities(s) {
+  return (s || "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/\s+/g, " ").trim();
+}
+
+let arxivCache = {}; // keyed by category, { data, ts }
+
+app.get("/api/research/arxiv", async (req, res) => {
+  try {
+    const cat = (req.query.cat || "all").toString();
+    const max = Math.min(parseInt(req.query.max) || 25, 50);
+    const search = (req.query.q || "").toString().trim();
+
+    const catDef = QFIN_CATEGORIES[cat] || QFIN_CATEGORIES.all;
+
+    // 10-min cache per category (skip cache when a text search is supplied)
+    const cacheKey = `${cat}:${search}`;
+    const now = Date.now();
+    if (!search && arxivCache[cacheKey] && now - arxivCache[cacheKey].ts < 10 * 60 * 1000) {
+      return res.json({ success: true, cached: true, category: catDef.label, data: arxivCache[cacheKey].data });
+    }
+
+    // Build arXiv query
+    let searchQuery = catDef.query;
+    if (search) {
+      // combine category + free-text in title/abstract
+      const esc = encodeURIComponent(search);
+      searchQuery = `(${catDef.query})+AND+(ti:${esc}+OR+abs:${esc})`;
+    } else {
+      searchQuery = encodeURIComponent(catDef.query);
+    }
+
+    const url =
+      `http://export.arxiv.org/api/query?search_query=${searchQuery}` +
+      `&start=0&max_results=${max}&sortBy=submittedDate&sortOrder=descending`;
+
+    const r = await axios.get(url, { timeout: 15000, headers: { "User-Agent": "AlphaHedgeQuant/1.0" } });
+    const xml = r.data;
+
+    const entries = extractAll(xml, "entry").map((block) => {
+      const id = extractOne(block, "id");
+      const arxivId = id.split("/abs/")[1] || id;
+      const title = decodeEntities(extractOne(block, "title"));
+      const summary = decodeEntities(extractOne(block, "summary"));
+      const published = extractOne(block, "published").slice(0, 10);
+      const updated = extractOne(block, "updated").slice(0, 10);
+
+      // authors
+      const authorBlocks = extractAll(block, "author");
+      const authors = authorBlocks.map((a) => decodeEntities(extractOne(a, "name"))).filter(Boolean);
+
+      // primary category
+      const primaryMatch = block.match(/<arxiv:primary_category[^>]*term="([^"]+)"/);
+      const primaryCat = primaryMatch ? primaryMatch[1] : "";
+
+      // links: pdf + abstract page
+      const pdfMatch = block.match(/<link[^>]*title="pdf"[^>]*href="([^"]+)"/);
+      const pdf = pdfMatch ? pdfMatch[1] : `https://arxiv.org/pdf/${arxivId}`;
+      const abs = `https://arxiv.org/abs/${arxivId}`;
+
+      return {
+        id: arxivId,
+        title,
+        authors: authors.slice(0, 6),
+        authorsMore: Math.max(0, authors.length - 6),
+        summary: summary.length > 320 ? summary.slice(0, 317) + "..." : summary,
+        published,
+        updated,
+        primaryCat,
+        abs,
+        pdf,
+        source: "arXiv",
+      };
+    });
+
+    if (!search) arxivCache[cacheKey] = { data: entries, ts: now };
+
+    res.json({
+      success: true,
+      cached: false,
+      category: catDef.label,
+      count: entries.length,
+      generatedAt: new Date(now).toISOString(),
+      data: entries,
+    });
+  } catch (e) {
+    console.error("[arXiv]", e.message);
+    res.status(500).json({ success: false, error: "Could not reach arXiv. " + e.message });
+  }
+});
+
+// List available categories (frontend builds the filter chips from this)
+app.get("/api/research/categories", (req, res) => {
+  res.json({
+    success: true,
+    data: Object.entries(QFIN_CATEGORIES).map(([key, v]) => ({ key, label: v.label })),
+  });
+});
 // ═══════════════════════════════════════════════════════
 // STARTUP
 // ═══════════════════════════════════════════════════════
