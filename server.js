@@ -1138,17 +1138,40 @@ function runBacktest(prices, strategy, params, initialCapital = 100000) {
 // ─────────────────────────────────────────────────────────────────────────
 // YAHOO FINANCE DAILY FETCHER (uses the existing yahooGet helper in server.js)
 // ─────────────────────────────────────────────────────────────────────────
-async function fetchYahooOHLC(rawSymbol, days = 120) {
+// ═══════════════════════════════════════════════════════════════════════════
+//  REPLACE the existing `async function fetchYahooOHLC(...)` (around line 1141)
+//  with this version. Adds `interval` support + Yahoo's per-interval range caps.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Yahoo's max lookback per interval (in days). Intraday is heavily limited.
+const YAHOO_INTERVAL_MAX_DAYS = {
+  '1m':  7,
+  '5m':  60,
+  '15m': 60,
+  '30m': 60,
+  '60m': 730,
+  '1h':  730,   // alias of 60m
+  '1d':  3650,
+  '1wk': 3650,
+};
+
+async function fetchYahooOHLC(rawSymbol, days = 120, interval = '1d') {
   // Accepts both NSE symbols ('RELIANCE') and Yahoo symbols ('RELIANCE.NS', 'AAPL')
   const ySymbol = rawSymbol.includes('.') || /^[A-Z]{1,5}$/.test(rawSymbol) && !STOCKS[rawSymbol]
     ? rawSymbol
     : rawSymbol + '.NS';
 
+  // Normalise interval + clamp the lookback to what Yahoo actually serves
+  const iv = (interval === '1h') ? '60m' : interval;
+  const maxDays = YAHOO_INTERVAL_MAX_DAYS[iv] || 3650;
+  const useDays = Math.min(days, maxDays);
+  const isIntraday = /m$/.test(iv) || iv === '60m';
+
   const p2 = Math.floor(Date.now() / 1000);
-  const p1 = Math.floor((Date.now() - days * 24 * 3600 * 1000) / 1000);
+  const p1 = Math.floor((Date.now() - useDays * 24 * 3600 * 1000) / 1000);
   const url =
     `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ySymbol)}` +
-    `?period1=${p1}&period2=${p2}&interval=1d`;
+    `?period1=${p1}&period2=${p2}&interval=${iv}`;
 
   try {
     const resp  = await yahooGet(url);
@@ -1160,7 +1183,10 @@ async function fetchYahooOHLC(rawSymbol, days = 120) {
     const adj   = res0.indicators?.adjclose?.[0]?.adjclose;
     return ts
       .map((t, i) => ({
-        date:   new Date(t * 1000).toISOString().split('T')[0],
+        // intraday → full ISO datetime; daily/weekly → date only
+        date:   isIntraday
+                  ? new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ')
+                  : new Date(t * 1000).toISOString().split('T')[0],
         open:   q.open[i]   != null ? +q.open[i].toFixed(2)   : null,
         high:   q.high[i]   != null ? +q.high[i].toFixed(2)   : null,
         low:    q.low[i]    != null ? +q.low[i].toFixed(2)    : null,
@@ -1169,7 +1195,7 @@ async function fetchYahooOHLC(rawSymbol, days = 120) {
       }))
       .filter(p => p.close != null && p.close > 0);
   } catch (e) {
-    console.error(`[OHLC] ${rawSymbol}: ${e.message}`);
+    console.error(`[OHLC] ${rawSymbol} (${iv}): ${e.message}`);
     return null;
   }
 }
@@ -1231,40 +1257,62 @@ app.get('/api/scanner/signals', async (req, res) => {
 // Body: { symbol, strategy, startDate?, endDate?, initialCapital?, params? }
 // Strategies: mean_reversion | momentum | bollinger | vwap
 // ─────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  REPLACE the existing `app.post('/api/backtest', ...)` handler (around 1234)
+//  with this version. Adds `interval` support + honest intraday-window handling.
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/api/backtest', async (req, res) => {
   try {
     const {
-      symbol        = 'RELIANCE',
-      strategy      = 'mean_reversion',
+      symbol         = 'RELIANCE',
+      strategy       = 'mean_reversion',
       startDate,
       endDate,
       initialCapital = 100000,
-      params        = {},
+      params         = {},
+      interval       = '1d',     // NEW: 1m | 5m | 15m | 30m | 60m/1h | 1d | 1wk
     } = req.body;
 
     if (!['mean_reversion', 'momentum', 'bollinger', 'vwap'].includes(strategy)) {
       return res.status(400).json({ success: false, error: `Unknown strategy "${strategy}". Use: mean_reversion | momentum | bollinger | vwap` });
     }
 
-    // Date range — default: last 365 days
+    const VALID_INTERVALS = ['1m', '5m', '15m', '30m', '60m', '1h', '1d', '1wk'];
+    if (!VALID_INTERVALS.includes(interval)) {
+      return res.status(400).json({ success: false, error: `Invalid interval. Use one of: ${VALID_INTERVALS.join(', ')}` });
+    }
+
+    const isIntraday = /m$/.test(interval) || interval === '1h' || interval === '60m';
+
+    // Date range — default last 365 days (daily) / shorter handled by clamp in fetch
     const p2 = endDate   ? Math.floor(new Date(endDate).getTime()   / 1000) : Math.floor(Date.now() / 1000);
     const p1 = startDate ? Math.floor(new Date(startDate).getTime() / 1000) : p2 - 365 * 24 * 3600;
     const days = Math.round((p2 - p1) / 86400) + 5;
 
-    const prices = await fetchYahooOHLC(symbol, days);
+    const prices = await fetchYahooOHLC(symbol, days, interval);
     if (!prices || prices.length < 40) {
-      return res.status(400).json({ success: false, error: `Not enough data for ${symbol}. Check symbol (use NSE tickers or SYMBOL.NS / AAPL for US).` });
+      return res.status(400).json({
+        success: false,
+        error: isIntraday
+          ? `Not enough ${interval} data for ${symbol}. Yahoo limits intraday history (1m≈7d, 5/15/30m≈60d, 1h≈730d). Pick a wider interval or a recent window.`
+          : `Not enough data for ${symbol}. Check the symbol (NSE ticker, SYMBOL.NS, or AAPL for US).`,
+      });
     }
 
-    // Filter to requested date window
-    const startStr = startDate || '';
-    const endStr   = endDate   || '';
-    const filtered = prices.filter(p =>
-      (!startStr || p.date >= startStr) &&
-      (!endStr   || p.date <= endStr)
-    );
+    // For intraday, the date strings are 'YYYY-MM-DD HH:MM' — only date-filter when
+    // the user supplied dates AND we're on a daily/weekly interval. For intraday we
+    // use whatever window Yahoo returned (already clamped), to keep behaviour honest.
+    let filtered = prices;
+    if (!isIntraday) {
+      const startStr = startDate || '';
+      const endStr   = endDate   || '';
+      filtered = prices.filter(p =>
+        (!startStr || p.date >= startStr) &&
+        (!endStr   || p.date <= endStr)
+      );
+    }
     if (filtered.length < 40) {
-      return res.status(400).json({ success: false, error: 'Date range too narrow — need at least 40 trading days.' });
+      return res.status(400).json({ success: false, error: 'Date range too narrow — need at least 40 bars.' });
     }
 
     const result = runBacktest(filtered, strategy, params, Number(initialCapital));
@@ -1273,7 +1321,9 @@ app.post('/api/backtest', async (req, res) => {
       success: true,
       symbol,
       strategy,
-      period: { from: filtered[0].date, to: filtered[filtered.length - 1].date, days: filtered.length },
+      interval,
+      intraday: isIntraday,
+      period: { from: filtered[0].date, to: filtered[filtered.length - 1].date, bars: filtered.length },
       initialCapital: Number(initialCapital),
       ...result,
     });
