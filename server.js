@@ -1468,6 +1468,44 @@ app.get("/api/research/categories", (req, res) => {
     data: Object.entries(QFIN_CATEGORIES).map(([key, v]) => ({ key, label: v.label })),
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADD THIS ROUTE to server.js, ABOVE app.listen(...)
+//  GET /api/prices?symbol=RELIANCE&interval=1d
+//  Returns raw OHLC array — used by the custom-strategy (Pyodide) page.
+//  Reuses fetchYahooOHLC (already interval-aware).
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/prices', async (req, res) => {
+  try {
+    const symbol   = (req.query.symbol || 'RELIANCE').toString();
+    const interval = (req.query.interval || '1d').toString();
+
+    const VALID = ['1m','5m','15m','30m','60m','1h','1d','1wk'];
+    if (!VALID.includes(interval)) {
+      return res.status(400).json({ success: false, error: `Invalid interval. Use: ${VALID.join(', ')}` });
+    }
+
+    // Lookback window per interval (daily/weekly get ~2y)
+    const DAYS = { '1m':7, '5m':60, '15m':60, '30m':60, '60m':730, '1h':730, '1d':730, '1wk':730 };
+    const days = DAYS[interval] || 730;
+
+    const prices = await fetchYahooOHLC(symbol, days, interval);
+    if (!prices || prices.length < 20) {
+      return res.status(400).json({ success: false, error: `Not enough data for ${symbol} at ${interval}.` });
+    }
+
+    res.json({
+      success: true,
+      symbol,
+      interval,
+      count: prices.length,
+      data: prices,   // [{date, open, high, low, close, volume}, ...]
+    });
+  } catch (e) {
+    console.error('[Prices]', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
 // ═══════════════════════════════════════════════════════
 // STARTUP
 // ═══════════════════════════════════════════════════════
