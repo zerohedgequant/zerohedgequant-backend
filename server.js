@@ -658,6 +658,21 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
 }));
 
 // ── OPTION CHAIN ──
+═══════════════════════════════════════════════════════════════════
+  BACKEND FIX — Option chain EXPIRY LIST (server.js)
+  Problem: /option/chain (no expiry_date) returns only the NEAREST
+  expiry, so the expiries[] list had just 1 entry → no selector.
+  Fix: also call /option/contract to get the FULL expiry list.
+═══════════════════════════════════════════════════════════════════
+
+REPLACE the entire existing route:
+
+    app.get('/api/option-chain/:underlying', async (req, res) => {
+       ... (the whole handler, down to its closing  });  )
+
+WITH THIS:
+
+─────────────────────────────────────────────────────────────────
 app.get('/api/option-chain/:underlying', async (req, res) => {
   const ul = req.params.underlying.toUpperCase();
   const expiry = req.query.expiry || '';
@@ -669,26 +684,36 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
   else if (STOCKS[ul]) instKeyOC = `NSE_EQ|${STOCKS[ul].isin}`;
   else return res.status(404).json({ success: false, error: 'Unknown underlying' });
 
-  // Get spot price
+  // Spot price
   const spotR = await upstoxFetch('/market-quote/ltp', { instrument_key: instKeyOC });
   const spotPrice = spotR?.data ? Object.values(spotR.data)[0]?.last_price || 0 : 0;
 
-  // Try real option chain
+  // ── NEW: full expiry list via /option/contract ──
+  let allExpiries = [];
+  try {
+    const contractR = await upstoxFetch('/option/contract', { instrument_key: instKeyOC });
+    if (contractR?.data && Array.isArray(contractR.data)) {
+      allExpiries = [...new Set(contractR.data.map(c => c.expiry).filter(Boolean))].sort();
+    }
+  } catch (e) { console.error('[OC expiries]', e.message); }
+
+  // Chain for the chosen (or nearest) expiry
   const params = { instrument_key: instKeyOC };
-  if (expiry) params.expiry_date = expiry;
+  const useExpiry = expiry || allExpiries[0] || '';
+  if (useExpiry) params.expiry_date = useExpiry;
   const result = await upstoxFetch('/option/chain', params);
 
   if (result?.data && Array.isArray(result.data) && result.data.length > 0) {
     const strikes = result.data.map(item => ({
       strike_price: item.strike_price,
-      expiry: item.expiry || expiry,
+      expiry: item.expiry || useExpiry,
       call: item.call_options ? {
         ltp: item.call_options.market_data?.ltp || 0,
         change: item.call_options.market_data?.net_change || 0,
         volume: item.call_options.market_data?.volume || 0,
         oi: item.call_options.market_data?.oi || 0,
-        oi_change: item.call_options.market_data?.oi_change || 0,
-        iv: item.call_options.option_greeks?.iv ? +(item.call_options.option_greeks.iv * 100).toFixed(2) : null,
+        oi_change: (item.call_options.market_data?.oi || 0) - (item.call_options.market_data?.prev_oi || 0),
+        iv: item.call_options.option_greeks?.iv ? +(item.call_options.option_greeks.iv).toFixed(2) : null,
         delta: item.call_options.option_greeks?.delta ?? null,
         gamma: item.call_options.option_greeks?.gamma ?? null,
         theta: item.call_options.option_greeks?.theta ?? null,
@@ -699,8 +724,8 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
         change: item.put_options.market_data?.net_change || 0,
         volume: item.put_options.market_data?.volume || 0,
         oi: item.put_options.market_data?.oi || 0,
-        oi_change: item.put_options.market_data?.oi_change || 0,
-        iv: item.put_options.option_greeks?.iv ? +(item.put_options.option_greeks.iv * 100).toFixed(2) : null,
+        oi_change: (item.put_options.market_data?.oi || 0) - (item.put_options.market_data?.prev_oi || 0),
+        iv: item.put_options.option_greeks?.iv ? +(item.put_options.option_greeks.iv).toFixed(2) : null,
         delta: item.put_options.option_greeks?.delta ?? null,
         gamma: item.put_options.option_greeks?.gamma ?? null,
         theta: item.put_options.option_greeks?.theta ?? null,
@@ -708,24 +733,36 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
       } : null,
     }));
 
-    // Get expiry dates from data
-    const expiries = [...new Set(result.data.map(d => d.expiry).filter(Boolean))].sort();
+    // Prefer the full contract-derived list; fall back to chain-derived
+    const chainExpiries = [...new Set(result.data.map(d => d.expiry).filter(Boolean))].sort();
+    const expiries = allExpiries.length ? allExpiries : chainExpiries;
 
     return res.json({
       success: true,
-      data: { underlying: ul, spot_price: spotPrice, expiry: expiry || expiries[0] || 'next', expiries, strikes },
+      data: { underlying: ul, spot_price: spotPrice, expiry: useExpiry || expiries[0] || 'next', expiries, strikes },
       live: true,
       dataSource: 'Upstox'
     });
   }
 
-  // No option chain available
   return res.json({
     success: false,
     error: 'Option chain not available for this instrument',
-    spot_price: spotPrice
+    spot_price: spotPrice,
+    expiries: allExpiries,
   });
 });
+─────────────────────────────────────────────────────────────────
+
+NOTES:
+• Also fixed IV: Upstox already returns IV as a percentage (e.g. 12.5),
+  so the old code multiplied by 100 incorrectly (showed 1250). Removed ×100.
+• oi_change now computed as oi - prev_oi (Upstox doesn't send oi_change
+  directly; the old `.oi_change` field was always 0/undefined).
+
+After replacing: commit → Render redeploys (~50s).
+Then on /options you'll see the full expiry tab list (weekly + monthly),
+and IV / Chg-OI will be correct.
 
 // ── RATING TRACKER (Coming Soon) ──
 app.get('/api/ratings', (req, res) => {
