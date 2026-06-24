@@ -1352,7 +1352,7 @@ app.post('/api/backtest', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Date range too narrow — need at least 40 bars.' });
     }
 
-    const result = runBacktest(filtered, strategy, params, Number(initialCapital));
+    const result = runBacktest(filtered, strategy, params, Number(initialCapital), interval);
 
     res.json({
       success: true,
