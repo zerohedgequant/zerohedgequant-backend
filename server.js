@@ -1059,7 +1059,7 @@ function computeSignal(prices) {
 // ─────────────────────────────────────────────────────────────────────────
 // BACKTEST ENGINE — ported from QUANT-DESK app-2.py
 // ─────────────────────────────────────────────────────────────────────────
-function runBacktest(prices, strategy, params, initialCapital = 100000) {
+function periodsPerYear(interval) {   switch (interval) {     case '1m':  return 252 * 375;     case '5m':  return 252 * 75;     case '15m': return 252 * 25;     case '30m': return 252 * 12.5;     case '60m':     case '1h':  return 252 * 6.25;     case '1wk': return 52;     default:    return 252;   } }  function runBacktest(prices, strategy, params, initialCapital = 100000, interval = '1d') {
   const closes = prices.map(p => p.close);
   const n = closes.length;
   const positions = new Array(n).fill(0);
@@ -1125,12 +1125,12 @@ function runBacktest(prices, strategy, params, initialCapital = 100000) {
   const valid = stratRet.slice(1);
   const mean  = valid.reduce((a, b) => a + b, 0) / valid.length;
   const std   = Math.sqrt(valid.reduce((a, b) => a + (b - mean) ** 2, 0) / valid.length);
-  const sharpe = std === 0 ? 0 : (mean / std) * Math.sqrt(252);
+  const sharpe = std === 0 ? 0 : (mean / std) * Math.sqrt(periodsPerYear(interval));
 
   const downside = valid.filter(r => r < 0);
   const downStd  = downside.length < 2 ? 0.0001 :
     Math.sqrt(downside.reduce((a, b) => a + b ** 2, 0) / downside.length);
-  const sortino  = (mean / downStd) * Math.sqrt(252);
+  const sortino  = (mean / downStd) * Math.sqrt(periodsPerYear(interval));
 
   // Max drawdown
   let maxDD = 0, peak = portfolio[0];
@@ -1166,7 +1166,7 @@ function runBacktest(prices, strategy, params, initialCapital = 100000) {
       winRate:          +winRate.toFixed(1),
       trades,
       finalValue:       Math.round(finalVal),
-      annualizedReturn: +(((finalVal / initialCapital) ** (252 / n) - 1) * 100).toFixed(2),
+      annualizedReturn: +(((finalVal / initialCapital) ** (periodsPerYear(interval) / n) - 1) * 100).toFixed(2),
     },
     equityCurve: curve,
   };
