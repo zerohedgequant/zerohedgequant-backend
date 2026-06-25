@@ -737,17 +737,7 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
     expiries: allExpiries,
   });
 });
-─────────────────────────────────────────────────────────────────
 
-NOTES:
-• Also fixed IV: Upstox already returns IV as a percentage (e.g. 12.5),
-  so the old code multiplied by 100 incorrectly (showed 1250). Removed ×100.
-• oi_change now computed as oi - prev_oi (Upstox doesn't send oi_change
-  directly; the old `.oi_change` field was always 0/undefined).
-
-After replacing: commit → Render redeploys (~50s).
-Then on /options you'll see the full expiry tab list (weekly + monthly),
-and IV / Chg-OI will be correct.
 
 // ── RATING TRACKER (Coming Soon) ──
 app.get('/api/ratings', (req, res) => {
