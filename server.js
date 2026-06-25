@@ -657,22 +657,7 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
   return all;
 }));
 
-// ── OPTION CHAIN ──
-═══════════════════════════════════════════════════════════════════
-  BACKEND FIX — Option chain EXPIRY LIST (server.js)
-  Problem: /option/chain (no expiry_date) returns only the NEAREST
-  expiry, so the expiries[] list had just 1 entry → no selector.
-  Fix: also call /option/contract to get the FULL expiry list.
-═══════════════════════════════════════════════════════════════════
 
-REPLACE the entire existing route:
-
-    app.get('/api/option-chain/:underlying', async (req, res) => {
-       ... (the whole handler, down to its closing  });  )
-
-WITH THIS:
-
-─────────────────────────────────────────────────────────────────
 app.get('/api/option-chain/:underlying', async (req, res) => {
   const ul = req.params.underlying.toUpperCase();
   const expiry = req.query.expiry || '';
