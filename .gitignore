@@ -1,0 +1,24 @@
+# Keep secrets, local credentials and generated artifacts out of Git.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.jks
+*credentials*.json
+*service-account*.json
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+.vercel/
+**/.vercel/
+coverage/
+dist/
+.DS_Store
+*.log
