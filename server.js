@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -881,16 +882,27 @@ const AUTH = {
 
 app.get('/auth/login', (req, res) => {
   if (!AUTH.apiKey) return res.status(500).send('UPSTOX_API_KEY not set on server');
+  const state = crypto.randomBytes(32).toString('hex');
+  res.cookie('ahq_upstox_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 10 * 60 * 1000, path: '/auth/callback' });
   const url =
     'https://api.upstox.com/v2/login/authorization/dialog' +
     `?response_type=code&client_id=${encodeURIComponent(AUTH.apiKey)}` +
-    `&redirect_uri=${encodeURIComponent(AUTH.redirectUri)}`;
+    `&redirect_uri=${encodeURIComponent(AUTH.redirectUri)}` +
+    `&state=${encodeURIComponent(state)}`;
   res.redirect(url);
 });
 
 app.get('/auth/callback', async (req, res) => {
   try {
-    const { code } = req.query;
+    const { code, state } = req.query;
+    const cookie = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith('ahq_upstox_oauth_state='));
+    const cookieState = cookie ? cookie.slice('ahq_upstox_oauth_state='.length) : '';
+    res.clearCookie('ahq_upstox_oauth_state', {httpOnly:true,secure:true,sameSite:'lax',path:'/auth/callback'});
+    const supplied = typeof state === 'string' ? state : '';
+    if (!supplied || supplied.length !== 64 || cookieState.length !== 64 ||
+        !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(cookieState))) {
+      return res.status(403).send('Invalid or expired Upstox login session. Start again from /auth/login.');
+    }
     if (!code) return res.status(400).send('No auth code returned by Upstox');
     const body = new URLSearchParams({
       code,
