@@ -88,7 +88,7 @@ async function upstoxFetch(endpoint, params = {}) {
 }
 
 // Fetch quotes one instrument at a time (batched commas break Upstox URL encoding)
-async function fetchQuotesIndividually(symbols, parallel = 5) {
+async function fetchQuotesIndividually(symbols, parallel = 3) {
   const out = {};
   for (let i = 0; i < symbols.length; i += parallel) {
     const batch = symbols.slice(i, i + parallel);
@@ -116,7 +116,7 @@ async function fetchQuotesIndividually(symbols, parallel = 5) {
         open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0, prevClose
       };
     }
-    if (i + parallel < symbols.length) await new Promise(r => setTimeout(r, 300));
+    if (i + parallel < symbols.length) await new Promise(r => setTimeout(r, 650));
   }
   return out;
 }
@@ -355,31 +355,50 @@ async function backgroundFetchFundamentals() {
 // CACHE
 // ═══════════════════════════════════════════════════════
 const cache = {};
+// Single-flight per cache key prevents N concurrent visitors from triggering
+// N full-universe quote fetches at the same expiry boundary.
+const cacheInFlight = new Map();
+const cacheRetryAt = new Map();
 function withCache(key, ttlMs, fetchFn) {
   return async (req, res) => {
     const now = Date.now();
-    if (cache[key] && now - cache[key].ts < ttlMs) {
-      return res.json({ success: true, data: cache[key].data, cached: true });
+    const previous = cache[key];
+    if (previous && now - previous.ts < ttlMs) {
+      return res.json({ success: true, data: previous.data, cached: true, fetchedAt: new Date(previous.ts).toISOString() });
     }
-    try {
-      const data = await fetchFn(req);
-      if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
-        cache[key] = { data, ts: now };
-        return res.json({ success: true, data });
-      }
-      if (cache[key]) return res.json({ success: true, data: cache[key].data, stale: true });
-      return res.json({ success: false, error: 'No data available' });
-    } catch (e) {
-      console.error(`[${key}]`, e.message);
-      if (cache[key]) return res.json({ success: true, data: cache[key].data, stale: true });
-      return res.status(500).json({ success: false, error: e.message });
+    if ((cacheRetryAt.get(key) || 0) > now) {
+      if (previous) return res.json({ success: true, data: previous.data, stale: true, fetchedAt: new Date(previous.ts).toISOString() });
+      return res.status(503).json({ success: false, error: 'Quote service cooling down; try again shortly' });
     }
+    if (!cacheInFlight.has(key)) {
+      const pending = Promise.resolve().then(() => fetchFn(req)).then(data => {
+        if (!data || (Array.isArray(data) ? !data.length : !Object.keys(data).length)) {
+          cacheRetryAt.set(key, Date.now() + 30000);
+          return null;
+        }
+        cache[key] = {data, ts: Date.now()};
+        cacheRetryAt.delete(key);
+        return data;
+      }).catch(err => {
+        console.error(`[${key}]`, err.message);
+        cacheRetryAt.set(key, Date.now() + 30000);
+        return null;
+      }).finally(() => cacheInFlight.delete(key));
+      cacheInFlight.set(key, pending);
+    }
+    await cacheInFlight.get(key);
+    const latest = cache[key];
+    if (latest) return res.json({success: true, data: latest.data, stale: latest.ts === previous?.ts, fetchedAt: new Date(latest.ts).toISOString()});
+    return res.status(503).json({success: false, error: 'Quote service unavailable; do not rely on unverified prices'});
   };
 }
 
 // ═══════════════════════════════════════════════════════
 // ROUTES
 // ═══════════════════════════════════════════════════════
+// Public uptime probe — no auth credentials or financial account details exposed.
+app.get('/healthz', (req, res) => res.json({status:'ok', service:'alphahedgequant-market-api', uptimeSeconds:Math.floor(process.uptime())}));
+
 app.get('/', (req, res) => {
   res.json({
     service: 'ZerohedgeQuant API v5.0 (Production)',
@@ -428,7 +447,7 @@ app.get('/api/indices', withCache('indices', 10000, async () => {
 }));
 
 // ── MARKET DATA ──
-app.get('/api/market-data', withCache('market', 15000, async () => {
+app.get('/api/market-data', withCache('market', 90000, async () => {
   const symbols = Object.keys(STOCKS);
   const live = await fetchQuotesIndividually(symbols);
   const allData = {};
@@ -574,11 +593,12 @@ app.get('/api/search', (req, res) => {
 });
 
 // ── SCREENER (real prices + Yahoo fundamentals where available) ──
-app.get('/api/screener', withCache('screener', 30000, async () => {
+app.get('/api/screener', withCache('screener', 90000, async () => {
   // Get live prices
   let liveData = cache.market?.data || {};
   const hasLive = Object.values(liveData).some(s => s.price > 0);
-  if (!hasLive) {
+  const marketCacheAge = Date.now() - (cache.market?.ts || 0);
+  if (!hasLive || marketCacheAge > 120000) {
     liveData = await fetchQuotesIndividually(Object.keys(STOCKS));
   }
 
