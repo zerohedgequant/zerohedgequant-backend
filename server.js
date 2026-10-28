@@ -658,7 +658,24 @@ app.get('/api/screener', withCache('screener', 30000, async () => {
 }));
 
 
+async function strictOptionFetch(endpoint, params) {
+  try {
+    const result = await axios.get(`${CONFIG.baseUrl}${endpoint}`, {
+      headers: { Authorization: `Bearer ${CONFIG.accessToken}`, Accept: 'application/json' },
+      params, timeout: 12000
+    });
+    return result.data;
+  } catch (err) {
+    const status = err.response?.status;
+    const e = new Error(status === 401 ? 'Upstox authorization expired: reconnect Upstox' : 'Upstox option-data request failed');
+    e.status = status === 401 ? 401 : 503;
+    e.code = status === 401 ? 'UPSTOX_AUTH_EXPIRED' : 'UPSTOX_OPTION_DATA_UNAVAILABLE';
+    throw e;
+  }
+}
+
 app.get('/api/option-chain/:underlying', async (req, res) => {
+  try {
   const ul = req.params.underlying.toUpperCase();
   const expiry = req.query.expiry || '';
 
@@ -681,18 +698,18 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
   let allExpiries = [];
   let availableContracts = [];
   try {
-    const contractR = await upstoxFetch('/option/contract', { instrument_key: instKeyOC });
+    const contractR = await strictOptionFetch('/option/contract', { instrument_key: instKeyOC });
     if (contractR?.data && Array.isArray(contractR.data)) {
       availableContracts = contractR.data;
       allExpiries = [...new Set(contractR.data.map(c => c.expiry).filter(Boolean))].sort();
     }
-  } catch (e) { console.error('[OC expiries]', e.message); }
+  } catch (e) { if (e.status === 401) throw e; console.error('[OC expiries]', e.message); }
 
   // Chain for the chosen (or nearest) expiry
   const params = { instrument_key: instKeyOC };
   const useExpiry = expiry || allExpiries[0] || '';
   if (useExpiry) params.expiry_date = useExpiry;
-  const result = await upstoxFetch('/option/chain', params);
+  const result = await strictOptionFetch('/option/chain', params);
   if (!result) return res.status(503).json({success:false,error:'Upstox option chain request failed; check authentication or provider availability',code:'UPSTOX_UNAVAILABLE'});
 
   if (result?.data && Array.isArray(result.data) && result.data.length > 0) {
@@ -753,6 +770,13 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
     spot_price: spotPrice,
     expiries: allExpiries,
   });
+  } catch (err) {
+    return res.status(err.status || 503).json({
+      success: false,
+      code: err.code || 'UPSTOX_OPTION_DATA_UNAVAILABLE',
+      error: err.status === 401 ? 'Upstox session expired; reconnect the data provider' : 'Option data could not be retrieved from Upstox'
+    });
+  }
 });
 
 
