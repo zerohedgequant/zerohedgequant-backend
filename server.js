@@ -669,15 +669,21 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
   else if (STOCKS[ul]) instKeyOC = `NSE_EQ|${STOCKS[ul].isin}`;
   else return res.status(404).json({ success: false, error: 'Unknown underlying' });
 
+  // Never represent an invalid/expired Upstox token as an unsupported option contract.
+  if (!CONFIG.accessToken) {
+    return res.status(401).json({success:false,error:'Upstox authentication required',code:'UPSTOX_AUTH_REQUIRED'});
+  }
   // Spot price
   const spotR = await upstoxFetch('/market-quote/ltp', { instrument_key: instKeyOC });
   const spotPrice = spotR?.data ? Object.values(spotR.data)[0]?.last_price || 0 : 0;
 
   // ── NEW: full expiry list via /option/contract ──
   let allExpiries = [];
+  let availableContracts = [];
   try {
     const contractR = await upstoxFetch('/option/contract', { instrument_key: instKeyOC });
     if (contractR?.data && Array.isArray(contractR.data)) {
+      availableContracts = contractR.data;
       allExpiries = [...new Set(contractR.data.map(c => c.expiry).filter(Boolean))].sort();
     }
   } catch (e) { console.error('[OC expiries]', e.message); }
@@ -687,46 +693,57 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
   const useExpiry = expiry || allExpiries[0] || '';
   if (useExpiry) params.expiry_date = useExpiry;
   const result = await upstoxFetch('/option/chain', params);
+  if (!result) return res.status(503).json({success:false,error:'Upstox option chain request failed; check authentication or provider availability',code:'UPSTOX_UNAVAILABLE'});
 
   if (result?.data && Array.isArray(result.data) && result.data.length > 0) {
+    const contractByKey = new Map(availableContracts.filter(c => c.instrument_key).map(c => [c.instrument_key, c]));
+    const optionDetails = option => {
+      if (!option) return null;
+      const market = option.market_data || {};
+      const greeks = option.option_greeks || {};
+      const contract = contractByKey.get(option.instrument_key);
+      return {
+        instrument_key: option.instrument_key || null,
+        lot_size: Number.isSafeInteger(Number(contract?.lot_size)) && Number(contract?.lot_size)>0 ? Number(contract.lot_size) : null,
+        tick_size: contract?.tick_size ?? null,
+        ltp: market.ltp ?? null,
+        bid_price: market.bid_price ?? null,
+        ask_price: market.ask_price ?? null,
+        bid_qty: market.bid_qty ?? null,
+        ask_qty: market.ask_qty ?? null,
+        change: market.net_change ?? null,
+        volume: market.volume ?? null,
+        oi: market.oi ?? null,
+        oi_change: market.oi != null && market.prev_oi != null ? market.oi - market.prev_oi : null,
+        iv: greeks.iv ?? null,
+        delta: greeks.delta ?? null,
+        gamma: greeks.gamma ?? null,
+        theta: greeks.theta ?? null,
+        vega: greeks.vega ?? null,
+        rho: greeks.rho ?? null,
+        pop: greeks.pop ?? null
+      };
+    };
     const strikes = result.data.map(item => ({
       strike_price: item.strike_price,
       expiry: item.expiry || useExpiry,
-      call: item.call_options ? {
-        ltp: item.call_options.market_data?.ltp || 0,
-        change: item.call_options.market_data?.net_change || 0,
-        volume: item.call_options.market_data?.volume || 0,
-        oi: item.call_options.market_data?.oi || 0,
-        oi_change: (item.call_options.market_data?.oi || 0) - (item.call_options.market_data?.prev_oi || 0),
-        iv: item.call_options.option_greeks?.iv ? +(item.call_options.option_greeks.iv).toFixed(2) : null,
-        delta: item.call_options.option_greeks?.delta ?? null,
-        gamma: item.call_options.option_greeks?.gamma ?? null,
-        theta: item.call_options.option_greeks?.theta ?? null,
-        vega: item.call_options.option_greeks?.vega ?? null,
-      } : null,
-      put: item.put_options ? {
-        ltp: item.put_options.market_data?.ltp || 0,
-        change: item.put_options.market_data?.net_change || 0,
-        volume: item.put_options.market_data?.volume || 0,
-        oi: item.put_options.market_data?.oi || 0,
-        oi_change: (item.put_options.market_data?.oi || 0) - (item.put_options.market_data?.prev_oi || 0),
-        iv: item.put_options.option_greeks?.iv ? +(item.put_options.option_greeks.iv).toFixed(2) : null,
-        delta: item.put_options.option_greeks?.delta ?? null,
-        gamma: item.put_options.option_greeks?.gamma ?? null,
-        theta: item.put_options.option_greeks?.theta ?? null,
-        vega: item.put_options.option_greeks?.vega ?? null,
-      } : null,
+      call: optionDetails(item.call_options),
+      put: optionDetails(item.put_options),
     }));
 
     // Prefer the full contract-derived list; fall back to chain-derived
     const chainExpiries = [...new Set(result.data.map(d => d.expiry).filter(Boolean))].sort();
     const expiries = allExpiries.length ? allExpiries : chainExpiries;
+    const expiryContracts = availableContracts.filter(c => c.expiry === (useExpiry || expiries[0]));
+    const lots = [...new Set(expiryContracts.map(c => Number(c.lot_size)).filter(v => Number.isSafeInteger(v) && v>0))];
+    const lotSize = lots.length === 1 ? lots[0] : null;
 
     return res.json({
       success: true,
-      data: { underlying: ul, spot_price: spotPrice, expiry: useExpiry || expiries[0] || 'next', expiries, strikes },
+      data: { underlying: ul, underlying_key: instKeyOC, spot_price: spotPrice || result.data[0]?.underlying_spot_price || 0, expiry: useExpiry || expiries[0] || 'next', expiries, lot_size: lotSize, strikes, received_at: new Date().toISOString() },
       live: true,
-      dataSource: 'Upstox'
+      dataSource: 'Upstox',
+      quoteNotice: 'Snapshot from Upstox; received_at is backend receipt time, not exchange tick time.'
     });
   }
 
