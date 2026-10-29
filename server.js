@@ -1428,16 +1428,18 @@ app.post('/api/backtest', async (req, res) => {
 
 // arXiv quantitative-finance subcategories
 const QFIN_CATEGORIES = {
-  all:    { label: "All q-fin",            query: "cat:q-fin.*" },
-  ST:     { label: "Statistics / Stat-arb", query: "cat:q-fin.ST" },
-  TR:     { label: "Trading & Microstructure", query: "cat:q-fin.TR" },
-  PM:     { label: "Portfolio Management",  query: "cat:q-fin.PM" },
-  RM:     { label: "Risk Management",       query: "cat:q-fin.RM" },
-  CP:     { label: "Computational Finance", query: "cat:q-fin.CP" },
-  PR:     { label: "Pricing of Securities", query: "cat:q-fin.PR" },
-  MF:     { label: "Mathematical Finance",  query: "cat:q-fin.MF" },
-  GN:     { label: "General Finance",       query: "cat:q-fin.GN" },
-  EC:     { label: "Economics",             query: "cat:q-fin.EC" },
+  all: { label: "All research", query: "(cat:q-fin.ST OR cat:q-fin.TR OR cat:q-fin.PM OR cat:q-fin.RM OR cat:q-fin.CP OR cat:q-fin.PR OR cat:q-fin.MF OR cat:q-fin.EC OR cat:math.OC OR cat:stat.ML OR cat:cs.LG OR cat:cs.AI OR cat:cs.CL OR cat:econ.EM OR cat:econ.GN)" },
+  quant: { label: "Quant Finance", query: "(cat:q-fin.ST OR cat:q-fin.TR OR cat:q-fin.PM OR cat:q-fin.RM OR cat:q-fin.CP OR cat:q-fin.PR OR cat:q-fin.MF)" },
+  math: { label: "Mathematics", query: "(cat:math.PR OR cat:math.ST OR cat:math.OC OR cat:math.NA)" },
+  engineering: { label: "Financial Engineering", query: "(cat:q-fin.CP OR cat:q-fin.PR OR cat:q-fin.MF OR cat:q-fin.RM)" },
+  finance: { label: "Finance", query: "(cat:q-fin.GN OR cat:q-fin.PM OR cat:q-fin.TR OR cat:q-fin.EC)" },
+  economics: { label: "Economics", query: "(cat:econ.EM OR cat:econ.GN OR cat:econ.TH OR cat:q-fin.EC)" },
+  ml: { label: "Machine Learning", query: "(cat:cs.LG OR cat:stat.ML)" },
+  ai: { label: "Artificial Intelligence", query: "(cat:cs.AI OR cat:cs.LG)" },
+  llm: { label: "LLMs & NLP", query: "(cat:cs.CL OR cat:cs.AI)" },
+  ST: { label: "Stat-arb", query: "cat:q-fin.ST" },
+  TR: { label: "Trading & Microstructure", query: "cat:q-fin.TR" },
+  RM: { label: "Risk", query: "cat:q-fin.RM" }
 };
 
 // Tiny XML field extractor (arXiv returns Atom XML). Avoids adding an XML lib.
@@ -1465,31 +1467,32 @@ let arxivCache = {}; // keyed by category, { data, ts }
 app.get("/api/research/arxiv", async (req, res) => {
   try {
     const cat = (req.query.cat || "all").toString();
-    const max = Math.min(parseInt(req.query.max) || 25, 50);
-    const search = (req.query.q || "").toString().trim();
+    const max = Math.max(1, Math.min(parseInt(req.query.max) || 25, 60));
+    const search = (req.query.q || "").toString().trim().slice(0, 100);
 
     const catDef = QFIN_CATEGORIES[cat] || QFIN_CATEGORIES.all;
 
     // 10-min cache per category (skip cache when a text search is supplied)
-    const cacheKey = `${cat}:${search}`;
+    const cacheKey = `${cat}:${search.toLowerCase()}:${max}`;
     const now = Date.now();
-    if (!search && arxivCache[cacheKey] && now - arxivCache[cacheKey].ts < 10 * 60 * 1000) {
+    if (arxivCache[cacheKey] && now - arxivCache[cacheKey].ts < 24 * 60 * 60 * 1000) {
       return res.json({ success: true, cached: true, category: catDef.label, data: arxivCache[cacheKey].data });
     }
 
-    // Build arXiv query
-    let searchQuery = catDef.query;
-    if (search) {
-      // combine category + free-text in title/abstract
-      const esc = encodeURIComponent(search);
-      searchQuery = `(${catDef.query})+AND+(ti:${esc}+OR+abs:${esc})`;
-    } else {
-      searchQuery = encodeURIComponent(catDef.query);
-    }
-
-    const url =
-      `http://export.arxiv.org/api/query?search_query=${searchQuery}` +
-      `&start=0&max_results=${max}&sortBy=submittedDate&sortOrder=descending`;
+    // Encode once with URLSearchParams; searches the paper's title and abstract.
+    // All-category keyword searches search across all arXiv subjects.
+    const terms = search.match(/"[^"]+"|[^\s]+/g)?.slice(0, 8) || [];
+    const freeText = terms.map(t => `(ti:${t.replace(/[^a-zA-Z0-9 -]/g,"").trim().replace(/\s+/g,"_")} OR abs:${t.replace(/[^a-zA-Z0-9 -]/g,"").trim().replace(/\s+/g,"_")})`).filter(x => !x.includes("ti: OR")).join(" AND ");
+    const searchQuery = search
+      ? (cat === "all" ? freeText : `(${catDef.query}) AND (${freeText})`)
+      : catDef.query;
+    const params = new URLSearchParams({
+      search_query: searchQuery,
+      start: "0", max_results: String(max),
+      sortBy: search ? "relevance" : "submittedDate",
+      sortOrder: "descending"
+    });
+    const url = `https://export.arxiv.org/api/query?${params.toString()}`;
 
     const r = await axios.get(url, { timeout: 15000, headers: { "User-Agent": "AlphaHedgeQuant/1.0" } });
     const xml = r.data;
@@ -1530,7 +1533,7 @@ app.get("/api/research/arxiv", async (req, res) => {
       };
     });
 
-    if (!search) arxivCache[cacheKey] = { data: entries, ts: now };
+    arxivCache[cacheKey] = { data: entries, ts: now };
 
     res.json({
       success: true,
@@ -1542,7 +1545,7 @@ app.get("/api/research/arxiv", async (req, res) => {
     });
   } catch (e) {
     console.error("[arXiv]", e.message);
-    res.status(500).json({ success: false, error: "Could not reach arXiv. " + e.message });
+    res.status(500).json({ success: false, error: "Research feed temporarily unavailable" });
   }
 });
 
