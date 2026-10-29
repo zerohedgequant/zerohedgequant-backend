@@ -465,6 +465,28 @@ app.get('/api/market-data', withCache('market', 90000, async () => {
   return allData;
 }));
 
+
+// Terminal quote snapshot: actual Upstox top-five depth, never fabricated.
+// Read-only; access tokens stay server-side. Supported NSE cash equities only.
+app.get('/api/terminal/quote/:symbol', async (req,res)=>{
+ const symbol=String(req.params.symbol||'').toUpperCase();
+ if(!STOCKS[symbol])return res.status(404).json({success:false,error:'Unsupported symbol'});
+ if(!CONFIG.accessToken)return res.status(503).json({success:false,error:'Upstox connection required',code:'UPSTOX_AUTH_REQUIRED'});
+ const key='NSE_EQ|'+STOCKS[symbol].isin;
+ const response=await upstoxFetch('/market-quote/quotes',{instrument_key:key});
+ const raw=response?.data?Object.values(response.data)[0]:null;
+ if(!raw)return res.status(503).json({success:false,error:'Live depth unavailable: check Upstox session'});
+ const level=x=>({price:Number(x.price)||0,quantity:Number(x.quantity)||0,orders:Number(x.orders)||0});
+ res.set('Cache-Control','no-store');
+ res.json({success:true,source:'Upstox full quote',symbol,name:STOCKS[symbol].name,
+  timestamp:raw.timestamp||raw.last_trade_time||null,
+  price:Number(raw.last_price)||0,volume:Number(raw.volume)||0,change:Number(raw.net_change)||0,
+  dayHigh:Number(raw.ohlc?.high)||0,dayLow:Number(raw.ohlc?.low)||0,
+  bids:(raw.depth?.buy||[]).filter(x=>Number(x.price)>0).slice(0,5).map(level),
+  asks:(raw.depth?.sell||[]).filter(x=>Number(x.price)>0).slice(0,5).map(level),
+  totalBuyQty:Number(raw.total_buy_quantity)||0,totalSellQty:Number(raw.total_sell_quantity)||0});
+});
+
 // ── SINGLE STOCK (Upstox price + Yahoo fundamentals) ──
 app.get('/api/stock/:symbol', async (req, res) => {
   const sym = req.params.symbol.toUpperCase();
