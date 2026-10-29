@@ -1591,6 +1591,104 @@ app.get('/api/prices', async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
+
+// IPO discovery: read-only, cached, and never exposes the Upstox access token.
+// Only approved public fields are returned. No orders/account details.
+const IPO_STATES = ['open', 'upcoming', 'closed', 'listed'];
+const ipoCache = new Map();
+const IPO_TTL_MS = 15 * 60 * 1000;
+const IPO_STALE_MS = 24 * 60 * 60 * 1000;
+function ipoNumber(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function ipoSummary(x) {
+  const low = ipoNumber(x.minimum_price), high = ipoNumber(x.maximum_price);
+  return {
+    id: String(x.id || ''), symbol: x.symbol || null, name: x.name || 'IPO',
+    status: x.status || null, segment: x.issue_type === 'sme' ? 'SME' : 'Mainboard',
+    issueSize: ipoNumber(x.issue_size), industry: x.industry || null,
+    priceBand: high > 0 ? (low > 0 && low !== high ? '₹' + low + '–₹' + high : '₹' + high) : null,
+    issuePrice: high > 0 ? high : null,
+    open: x.bidding_start_date || null, close: x.bidding_end_date || null,
+    subscription: ipoNumber(x.total_subscription),
+    gmp: null, source: 'Upstox'
+  };
+}
+function ipoDetail(x) {
+  const t = x.timeline || {}, r = x.registrar_info || {}, summary = ipoSummary(x);
+  const listingPrice = ipoNumber(x.listing_price);
+  return {
+    ...summary, type: summary.segment, openDate: summary.open, closeDate: summary.close,
+    faceValue: ipoNumber(x.face_value), lotSize: ipoNumber(x.lot_size),
+    minAmount: ipoNumber(x.minimum_quantity) && summary.issuePrice ?
+      +(Number(x.minimum_quantity) * summary.issuePrice).toFixed(2) : null,
+    minQuantity: ipoNumber(x.minimum_quantity), issueSize: summary.issueSize,
+    listingPrice, listingGain: listingPrice != null && summary.issuePrice ?
+      +((listingPrice - summary.issuePrice) / summary.issuePrice * 100).toFixed(2) : null,
+    listingDate: t.listing_date || null, allotmentDate: t.allotment_date || null,
+    registrar: r.name || null, listingOn: x.listing_exchange || null,
+    prospectus: /^https:\/\//.test(x.rhp_url || '') ? x.rhp_url :
+      (/^https:\/\//.test(x.drhp_url || '') ? x.drhp_url : null),
+    subscription: { total: summary.subscription, qib: null, nii: null, retail: null },
+    gmp: null, source: 'Upstox', dataNotice: 'Official IPO feed. GMP is not supplied by Upstox.'
+  };
+}
+async function ipoUpstox(endpoint, params) {
+  const response = await axios.get(CONFIG.baseUrl + endpoint, {
+    headers: { Authorization: 'Bearer ' + CONFIG.accessToken, Accept: 'application/json' },
+    params, timeout: 10000
+  });
+  if (response.data?.status !== 'success') throw new Error('IPO provider unavailable');
+  return response.data;
+}
+async function ipoCached(key, load) {
+  const now = Date.now(), prior = ipoCache.get(key);
+  if (prior && now - prior.at < IPO_TTL_MS) return { value: prior.value, stale: false, updatedAt: new Date(prior.at).toISOString() };
+  try {
+    const value = await load();
+    ipoCache.set(key, { value, at: Date.now() });
+    return { value, stale: false, updatedAt: new Date().toISOString() };
+  } catch (err) {
+    console.error('[IPO feed]', err.response?.status || err.message);
+    if (prior && now - prior.at < IPO_STALE_MS) return { value: prior.value, stale: true, updatedAt: new Date(prior.at).toISOString() };
+    const e = new Error('IPO feed unavailable');
+    e.status = err.response?.status === 401 ? 401 : 503;
+    throw e;
+  }
+}
+app.get('/api/ipos', async (req, res) => {
+  if (!CONFIG.accessToken) return res.status(503).json({success:false,error:'IPO feed authentication unavailable'});
+  const state = String(req.query.status || 'open');
+  if (!IPO_STATES.includes(state)) return res.status(400).json({success:false,error:'Invalid IPO status'});
+  try {
+    const result = await ipoCached('list:' + state, async () => {
+      const rows = [];
+      for (let page = 1; page <= 4; page++) {
+        const response = await ipoUpstox('/ipos', {status:state, page_number:page, records:30});
+        const items = Array.isArray(response.data) ? response.data : [];
+        rows.push(...items.map(ipoSummary).filter(x => x.id));
+        if (!items.length || page >= Number(response.meta_data?.page?.total_pages || 1)) break;
+      }
+      return rows;
+    });
+    return res.json({success:true, data:result.value, status:state, source:'Upstox', stale:result.stale, updatedAt:result.updatedAt});
+  } catch(e) {return res.status(e.status || 503).json({success:false,error:'IPO data temporarily unavailable'});}
+});
+app.get('/api/ipos/:id', async (req, res) => {
+  if (!CONFIG.accessToken) return res.status(503).json({success:false,error:'IPO feed authentication unavailable'});
+  const id = String(req.params.id || '');
+  if (!/^[a-z0-9][a-z0-9-]{1,119}$/.test(id)) return res.status(400).json({success:false,error:'Invalid IPO identifier'});
+  try {
+    const result = await ipoCached('detail:' + id, async () => {
+      const response = await ipoUpstox('/ipos/' + encodeURIComponent(id));
+      return ipoDetail(response.data || {});
+    });
+    return res.json({success:true, ipo:result.value, source:'Upstox', stale:result.stale, updatedAt:result.updatedAt});
+  } catch(e) {return res.status(e.status || 503).json({success:false,error:'IPO details temporarily unavailable'});}
+});
+
 // ═══════════════════════════════════════════════════════
 // STARTUP
 // ═══════════════════════════════════════════════════════
