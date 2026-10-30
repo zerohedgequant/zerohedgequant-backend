@@ -448,7 +448,7 @@ app.get('/api/indices', withCache('indices', 10000, async () => {
 }));
 
 // ── MARKET DATA ──
-app.get('/api/market-data', withCache('market', 90000, async () => {
+app.get('/api/market-data', withCache('market', 45000, async () => {
   const symbols = Object.keys(STOCKS);
   const live = await fetchQuotesIndividually(symbols);
   const allData = {};
@@ -648,12 +648,12 @@ app.get('/api/search', (req, res) => {
 });
 
 // ── SCREENER (real prices + Yahoo fundamentals where available) ──
-app.get('/api/screener', withCache('screener', 90000, async () => {
+app.get('/api/screener', withCache('screener', 45000, async () => {
   // Get live prices
   let liveData = cache.market?.data || {};
   const hasLive = Object.values(liveData).some(s => s.price > 0);
   const marketCacheAge = Date.now() - (cache.market?.ts || 0);
-  if (!hasLive || marketCacheAge > 120000) {
+  if (!hasLive || marketCacheAge > 45000) {
     liveData = await fetchQuotesIndividually(Object.keys(STOCKS));
   }
 
@@ -1348,7 +1348,7 @@ let scannerCache = { data: null, ts: 0 };
 
 app.get('/api/scanner/signals', async (req, res) => {
   const now = Date.now();
-  if (scannerCache.data && now - scannerCache.ts < 5 * 60 * 1000) {
+  if (scannerCache.data && now - scannerCache.ts < 2 * 60 * 1000) {
     return res.json({ success: true, data: scannerCache.data, cached: true, cachedAt: new Date(scannerCache.ts).toISOString() });
   }
 
