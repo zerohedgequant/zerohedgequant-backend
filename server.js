@@ -466,25 +466,57 @@ app.get('/api/market-data', withCache('market', 90000, async () => {
 }));
 
 
-// Terminal quote snapshot: actual Upstox top-five depth, never fabricated.
-// Read-only; access tokens stay server-side. Supported NSE cash equities only.
-app.get('/api/terminal/quote/:symbol', async (req,res)=>{
+// NSE cash-equity universe from Upstox daily instrument master, cached in memory.
+// Search and keys derive from actual exchange instruments, not a hard-coded shortlist.
+const zlib = require('zlib');
+let terminalUniverse={expires:0,items:[],bySymbol:new Map(),loading:null};
+async function loadTerminalUniverse(){
+ if(terminalUniverse.items.length&&Date.now()<terminalUniverse.expires)return terminalUniverse;
+ if(terminalUniverse.loading)return terminalUniverse.loading;
+ terminalUniverse.loading=(async()=>{
+  const response=await axios.get('https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz',{responseType:'arraybuffer',timeout:18000,maxContentLength:25000000});
+  const buffer=Buffer.from(response.data);
+  const rows=JSON.parse((buffer[0]===0x1f&&buffer[1]===0x8b?zlib.gunzipSync(buffer):buffer).toString('utf8'));
+  const items=rows.filter(x=>x.segment==='NSE_EQ'&&x.instrument_type==='EQ'&&/^NSE_EQ\\|INE[A-Z0-9]{9}$/.test(x.instrument_key)&&/^[A-Z0-9&_.-]{1,40}$/.test(x.trading_symbol))
+   .map(x=>({symbol:x.trading_symbol,name:x.short_name||x.name||x.trading_symbol,key:x.instrument_key}));
+  const bySymbol=new Map(items.map(x=>[x.symbol,x]));
+  terminalUniverse={items,bySymbol,expires:Date.now()+6*3600000,loading:null};
+  return terminalUniverse;
+ })().catch(err=>{terminalUniverse.loading=null;if(terminalUniverse.items.length)return terminalUniverse;throw err});
+ return terminalUniverse.loading;
+}
+app.get('/api/terminal/instruments',async(req,res)=>{
+ const q=String(req.query.q||'').toUpperCase().trim().slice(0,60);
+ try{const universe=await loadTerminalUniverse();const exact=q?universe.items.filter(x=>x.symbol===q):[];
+ const matches=q?universe.items.filter(x=>x.symbol!==q&&(x.symbol.startsWith(q)||x.name.toUpperCase().includes(q))).slice(0,19):universe.items.slice(0,20);
+ res.json({success:true,data:[...exact,...matches].slice(0,20),total:universe.items.length,source:'Upstox NSE BOD instruments'});
+ }catch{res.status(503).json({success:false,error:'NSE instrument list temporarily unavailable'})}
+});
+const terminalQuoteCache=new Map();
+app.get('/api/terminal/quote/:symbol',async(req,res)=>{
  const symbol=String(req.params.symbol||'').toUpperCase();
- if(!STOCKS[symbol])return res.status(404).json({success:false,error:'Unsupported symbol'});
+ if(!/^[A-Z0-9&_.-]{1,40}$/.test(symbol))return res.status(400).json({success:false,error:'Invalid symbol'});
+ let inst;
+ try{inst=(await loadTerminalUniverse()).bySymbol.get(symbol)}catch{}
+ if(!inst&&STOCKS[symbol])inst={symbol,name:STOCKS[symbol].name,key:'NSE_EQ|'+STOCKS[symbol].isin};
+ if(!inst)return res.status(404).json({success:false,error:'NSE equity instrument not found'});
  if(!CONFIG.accessToken)return res.status(503).json({success:false,error:'Upstox connection required',code:'UPSTOX_AUTH_REQUIRED'});
- const key='NSE_EQ|'+STOCKS[symbol].isin;
- const response=await upstoxFetch('/market-quote/quotes',{instrument_key:key});
+ const hit=terminalQuoteCache.get(inst.key);
+ if(hit&&Date.now()-hit.at<1000)return res.json(hit.data);
+ const response=await upstoxFetch('/market-quote/quotes',{instrument_key:inst.key});
  const raw=response?.data?Object.values(response.data)[0]:null;
- if(!raw)return res.status(503).json({success:false,error:'Live depth unavailable: check Upstox session'});
+ if(!raw)return res.status(503).json({success:false,error:'Upstox quote unavailable; check authentication'});
  const level=x=>({price:Number(x.price)||0,quantity:Number(x.quantity)||0,orders:Number(x.orders)||0});
- res.set('Cache-Control','no-store');
- res.json({success:true,source:'Upstox full quote',symbol,name:STOCKS[symbol].name,
-  timestamp:raw.timestamp||raw.last_trade_time||null,
+ const data={success:true,source:'Upstox REST full quote',symbol,name:inst.name,
+  timestamp:raw.last_trade_time||raw.timestamp||null,
   price:Number(raw.last_price)||0,volume:Number(raw.volume)||0,change:Number(raw.net_change)||0,
   dayHigh:Number(raw.ohlc?.high)||0,dayLow:Number(raw.ohlc?.low)||0,
   bids:(raw.depth?.buy||[]).filter(x=>Number(x.price)>0).slice(0,5).map(level),
   asks:(raw.depth?.sell||[]).filter(x=>Number(x.price)>0).slice(0,5).map(level),
-  totalBuyQty:Number(raw.total_buy_quantity)||0,totalSellQty:Number(raw.total_sell_quantity)||0});
+  totalBuyQty:Number(raw.total_buy_quantity)||0,totalSellQty:Number(raw.total_sell_quantity)||0};
+ terminalQuoteCache.set(inst.key,{at:Date.now(),data});
+ if(terminalQuoteCache.size>200)terminalQuoteCache.delete(terminalQuoteCache.keys().next().value);
+ res.set('Cache-Control','no-store');res.json(data);
 });
 
 // ── SINGLE STOCK (Upstox price + Yahoo fundamentals) ──
