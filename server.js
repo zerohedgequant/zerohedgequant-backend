@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const {canRefreshUpstoxSession} = require('./upstox-auth-policy');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -978,7 +979,7 @@ app.get('/auth/callback', async (req, res) => {
     // An unauthenticated /auth/login otherwise lets strangers overwrite the
     // market-data session with their own Upstox identity.
     const allowedUserId = process.env.UPSTOX_ALLOWED_USER_ID?.trim();
-    if (!allowedUserId || typeof r.data.user_id !== 'string' || r.data.user_id !== allowedUserId) {
+    if (!canRefreshUpstoxSession(r.data, allowedUserId)) {
       return res.status(403).send('Upstox account not authorized');
     }
     CONFIG.accessToken = r.data.access_token;   // live swap — no restart needed
@@ -990,7 +991,7 @@ app.get('/auth/callback', async (req, res) => {
       `<p style="color:#8a94a8">Valid until ~3:30 AM IST tomorrow. Updated: ${AUTH.updatedAt}</p></div></body>`
     );
   } catch (e) {
-    res.status(500).send('Token exchange failed: ' + (e.response?.data?.errors?.[0]?.message || e.message));
+    res.status(500).send('Token exchange unsuccessful; restart Upstox authorization.');
   }
 });
 
