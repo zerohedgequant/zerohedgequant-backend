@@ -935,6 +935,8 @@ const AUTH = {
 };
 
 app.get('/auth/login', (req, res) => {
+  // Bind the OAuth flow to the owner's Upstox account. This identity is a server-only secret setting.
+  if (!process.env.UPSTOX_ALLOWED_USER_ID?.trim()) return res.status(503).send('Account binding not configured');
   if (!AUTH.apiKey) return res.status(500).send('UPSTOX_API_KEY not set on server');
   const state = crypto.randomBytes(32).toString('hex');
   res.cookie('ahq_upstox_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 10 * 60 * 1000, path: '/auth/callback' });
@@ -971,6 +973,14 @@ app.get('/auth/callback', async (req, res) => {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' } }
     );
     if (!r.data || !r.data.access_token) throw new Error('No access_token in response');
+    // IMPORTANT: OAuth state prevents CSRF, but it does NOT establish that the
+    // person signing in is the owner of the connected brokerage account.
+    // An unauthenticated /auth/login otherwise lets strangers overwrite the
+    // market-data session with their own Upstox identity.
+    const allowedUserId = process.env.UPSTOX_ALLOWED_USER_ID?.trim();
+    if (!allowedUserId || typeof r.data.user_id !== 'string' || r.data.user_id !== allowedUserId) {
+      return res.status(403).send('Upstox account not authorized');
+    }
     CONFIG.accessToken = r.data.access_token;   // live swap — no restart needed
     AUTH.updatedAt = new Date().toISOString();
     cache.indices = null; cache.market = null; cache.screener = null;  // bust stale zero-price caches
