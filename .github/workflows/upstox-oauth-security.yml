@@ -1,0 +1,27 @@
+name: Upstox OAuth Security Verification
+on:
+  push:
+    branches:
+      - security/upstox-account-binding
+  pull_request:
+    paths:
+      - "server.js"
+      - "upstox-auth-policy.js"
+      - "tests/**"
+      - "package.json"
+      - ".github/workflows/upstox-oauth-security.yml"
+permissions:
+  contents: read
+jobs:
+  test-identity-binding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate backend syntax and identity checks without connecting to the broker
+        run: |
+          node --check server.js
+          npm test

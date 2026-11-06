@@ -2,8 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const {canRefreshUpstoxSession} = require('./upstox-auth-policy');
 
 const app = express();
+app.disable('x-powered-by');
+app.use((req,res,next)=>{
+  res.set('X-Content-Type-Options','nosniff');
+  res.set('X-Frame-Options','DENY');
+  res.set('Referrer-Policy','strict-origin-when-cross-origin');
+  if (req.secure || req.headers['x-forwarded-proto']==='https') res.set('Strict-Transport-Security','max-age=31536000');
+  next();
+});
 const PORT = process.env.PORT || 10000;
 
 const CONFIG = {
@@ -11,8 +20,8 @@ const CONFIG = {
   baseUrl: 'https://api.upstox.com/v2'
 };
 
-const ALLOWED_ORIGINS = [   'https://alphahedgequant.com',   'https://www.alphahedgequant.com',   'http://localhost:3000', ]; app.use(cors({   origin: (origin, cb) => {     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);     return cb(null, false);   },   methods: ['GET','POST','OPTIONS'],   allowedHeaders: ['Content-Type','Authorization'], }));  const RL_WINDOW_MS = 60 * 1000; const RL_MAX = 120; const RL_MAX_HEAVY = 20; const rlStore = new Map(); app.set('trust proxy', 1); function rateLimit(req, res, next) {   const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();   const now = Date.now();   let rec = rlStore.get(ip);   if (!rec || now > rec.resetAt) { rec = { count: 0, heavy: 0, resetAt: now + RL_WINDOW_MS }; rlStore.set(ip, rec); }   rec.count++;   const isHeavy = req.path.startsWith('/api/backtest') || req.path.startsWith('/api/scanner') || req.path.startsWith('/api/prices');   if (isHeavy) rec.heavy++;   if (rec.count > RL_MAX || (isHeavy && rec.heavy > RL_MAX_HEAVY)) {     return res.status(429).json({ success: false, error: 'Rate limit exceeded. Please slow down and try again shortly.' });   }   next(); } setInterval(() => { const now = Date.now(); for (const [ip, rec] of rlStore) if (now > rec.resetAt) rlStore.delete(ip); }, 5 * 60 * 1000);
-app.use(express.json());
+const ALLOWED_ORIGINS = [   'https://alphahedgequant.com',   'https://www.alphahedgequant.com', ...(process.env.NODE_ENV === 'production' ? [] : ['http://localhost:3000']), ]; app.use(cors({   origin: (origin, cb) => {     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);     return cb(null, false);   },   methods: ['GET','POST','OPTIONS'],   allowedHeaders: ['Content-Type','Authorization'], }));  const RL_WINDOW_MS = 60 * 1000; const RL_MAX = 120; const RL_MAX_HEAVY = 20; const rlStore = new Map(); app.set('trust proxy', 1); function rateLimit(req, res, next) {   const ip = req.ip || 'unknown';   const now = Date.now();   let rec = rlStore.get(ip);   if (!rec || now > rec.resetAt) { rec = { count: 0, heavy: 0, resetAt: now + RL_WINDOW_MS }; rlStore.set(ip, rec); }   rec.count++;   const isHeavy = req.path.startsWith('/api/backtest') || req.path.startsWith('/api/scanner') || req.path.startsWith('/api/prices');   if (isHeavy) rec.heavy++;   if (rec.count > RL_MAX || (isHeavy && rec.heavy > RL_MAX_HEAVY)) {     return res.status(429).json({ success: false, error: 'Rate limit exceeded. Please slow down and try again shortly.' });   }   next(); } setInterval(() => { const now = Date.now(); for (const [ip, rec] of rlStore) if (now > rec.resetAt) rlStore.delete(ip); }, 5 * 60 * 1000);
+app.use(express.json({ limit: '64kb' }));
 app.use('/api', rateLimit);
 // ═══════════════════════════════════════════════════════
 // STOCK UNIVERSE — 50 Nifty stocks, confirmed ISINs
@@ -403,11 +412,7 @@ app.get('/healthz', (req, res) => res.json({status:'ok', service:'alphahedgequan
 app.get('/', (req, res) => {
   res.json({
     service: 'ZerohedgeQuant API v5.0 (Production)',
-    status: 'running',
-    stocks: Object.keys(STOCKS).length,
-    tokenSet: !!CONFIG.accessToken,
-    yahooFundamentals: Object.keys(yahooCache).length,
-    dataDisclaimer: 'Prices from Upstox. Fundamentals from Yahoo Finance. Option chain from Upstox.'
+    status: 'ok'
   });
 });
 
@@ -934,7 +939,20 @@ const AUTH = {
   updatedAt: process.env.UPSTOX_ACCESS_TOKEN ? 'from env at boot' : null
 };
 
-app.get('/auth/login', (req, res) => {
+// Small, independent OAuth-initiation throttle. Identity is derived from Express's
+// configured trusted reverse proxy, not a caller-selected forwarded-header element.
+const oauthLoginHits = new Map();
+function limitOAuthLogin(req,res,next) {
+  const ip=req.ip || 'unknown',now=Date.now();
+  let entry=oauthLoginHits.get(ip);
+  if(!entry || entry.expires<now){entry={count:0,expires:now+3600000};oauthLoginHits.set(ip,entry);}
+  if(++entry.count>10)return res.status(429).send('Too many login attempts; retry later.');
+  if(oauthLoginHits.size>2000)for(const [key,v] of oauthLoginHits)if(v.expires<now)oauthLoginHits.delete(key);
+  next();
+}
+app.get('/auth/login', limitOAuthLogin, (req, res) => {
+  // Bind the OAuth flow to the owner's Upstox account. This identity is a server-only secret setting.
+  if (!process.env.UPSTOX_ALLOWED_USER_ID?.trim()) return res.status(503).send('Account binding not configured');
   if (!AUTH.apiKey) return res.status(500).send('UPSTOX_API_KEY not set on server');
   const state = crypto.randomBytes(32).toString('hex');
   res.cookie('ahq_upstox_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 10 * 60 * 1000, path: '/auth/callback' });
@@ -971,6 +989,14 @@ app.get('/auth/callback', async (req, res) => {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' } }
     );
     if (!r.data || !r.data.access_token) throw new Error('No access_token in response');
+    // IMPORTANT: OAuth state prevents CSRF, but it does NOT establish that the
+    // person signing in is the owner of the connected brokerage account.
+    // An unauthenticated /auth/login otherwise lets strangers overwrite the
+    // market-data session with their own Upstox identity.
+    const allowedUserId = process.env.UPSTOX_ALLOWED_USER_ID?.trim();
+    if (!canRefreshUpstoxSession(r.data, allowedUserId)) {
+      return res.status(403).send('Upstox account not authorized');
+    }
     CONFIG.accessToken = r.data.access_token;   // live swap — no restart needed
     AUTH.updatedAt = new Date().toISOString();
     cache.indices = null; cache.market = null; cache.screener = null;  // bust stale zero-price caches
@@ -980,7 +1006,7 @@ app.get('/auth/callback', async (req, res) => {
       `<p style="color:#8a94a8">Valid until ~3:30 AM IST tomorrow. Updated: ${AUTH.updatedAt}</p></div></body>`
     );
   } catch (e) {
-    res.status(500).send('Token exchange failed: ' + (e.response?.data?.errors?.[0]?.message || e.message));
+    res.status(500).send('Token exchange unsuccessful; restart Upstox authorization.');
   }
 });
 
@@ -1751,7 +1777,7 @@ app.get('/api/ipos/:id', async (req, res) => {
 // ═══════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`AlphaHedgeQuant API v8.0 (Production) on port ${PORT}`);
-  console.log(`${Object.keys(STOCKS).length} stocks | Token: ${CONFIG.accessToken ? 'SET' : 'MISSING'}`);
+  console.log(`${Object.keys(STOCKS).length} stock symbols configured`);
   console.log(`Daily token login: /auth/login`);
   console.log(`Universes: NSE ${Object.keys(STOCKS).length}+${NSE_EXTRA.length} | US ${US_STOCKS.length}`);
 
