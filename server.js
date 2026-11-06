@@ -412,7 +412,6 @@ app.get('/healthz', (req, res) => res.json({status:'ok', service:'alphahedgequan
 app.get('/', (req, res) => {
   res.json({
     service: 'ZerohedgeQuant API v5.0 (Production)',
-    status: 'running',
     status: 'ok'
   });
 });
