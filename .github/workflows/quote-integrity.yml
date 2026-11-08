@@ -1,0 +1,29 @@
+name: Quote integrity regression
+on:
+  pull_request:
+    paths:
+      - "server.js"
+      - "lib/quoteIntegrity.js"
+      - "tests/quoteIntegrity.test.cjs"
+      - ".github/workflows/quote-integrity.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server.js"
+      - "lib/quoteIntegrity.js"
+      - "tests/quoteIntegrity.test.cjs"
+      - ".github/workflows/quote-integrity.yml"
+permissions:
+  contents: read
+jobs:
+  quote-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check server.js
+      - run: node --test tests/quoteIntegrity.test.cjs
