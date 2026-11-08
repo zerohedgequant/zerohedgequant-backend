@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const {isUsableQuote} = require('./lib/quoteIntegrity');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -528,6 +529,15 @@ app.get('/api/stock/:symbol', async (req, res) => {
   // Fetch price from Upstox
   const result = await upstoxFetch('/market-quote/quotes', { instrument_key: `NSE_EQ|${info.isin}` });
   const val = result?.data ? Object.values(result.data)[0] : null;
+  // A failed/missing quote must never be published as a successfully priced
+  // equity with LTP 0, especially during an expired brokerage session.
+  if (!isUsableQuote(val)) {
+    return res.status(503).set('Cache-Control', 'no-store').json({
+      success: false,
+      code: 'MARKET_QUOTE_UNAVAILABLE',
+      error: 'Verified market price unavailable; reconnect market data and retry.'
+    });
+  }
 
   // Fetch fundamentals from Yahoo Finance
   const yahoo = await fetchYahooFundamentals(sym);
