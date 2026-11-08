@@ -30,6 +30,23 @@ jobs:
         with:
           node-version: "22"
       - run: node --check server.js
+      - name: Probe public US index chart metadata (no stored market payloads)
+        continue-on-error: true
+        run: |
+          node - <<'NODE'
+          (async()=>{
+            const indices=['^GSPC','^IXIC','^DJI','^VIX'];
+            let valid=0;
+            for (const symbol of indices){
+              const r=await fetch('https://query1.finance.yahoo.com/v8/finance/chart/'+encodeURIComponent(symbol)+'?range=5d&interval=1d',{headers:{'User-Agent':'Mozilla/5.0','Accept':'application/json'},signal:AbortSignal.timeout(9000)});
+              const j=await r.json().catch(()=>({}));
+              const meta=j?.chart?.result?.[0]?.meta;
+              const ok=r.status===200&&Number.isFinite(meta?.regularMarketPrice)&&Number.isFinite(meta?.regularMarketTime);
+              console.log(JSON.stringify({symbol,status:r.status,validTimestampedQuote:ok}));if(ok)valid++;
+            }
+            if(valid!==indices.length)process.exitCode=1;
+          })().catch(e=>{console.error('US index probe failed:',e.name);process.exitCode=1});
+          NODE
       - run: node --test tests/quoteIntegrity.test.cjs tests/yahooChartQuote.test.cjs
       - name: Probe current chart endpoint availability without exposing prices
         continue-on-error: true
