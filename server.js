@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const {isUsableQuote} = require('./lib/quoteIntegrity');
+const {fromYahooChart} = require('./lib/yahooChartQuote');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -279,6 +280,25 @@ async function fetchYahooQuoteFull(symbol, market) {
   const key = `${market}:${symbol}`;
   const cached = yqCache[key];
   if (cached && Date.now() - cached.ts < YQ_TTL) return cached.data;
+  // Yahoo quoteSummary now returns repeated HTTP 401 for US shares. The
+  // chart endpoint provides an independently timestamped, delayed indicative
+  // quote without a browser session cookie. Keep Indian quote logic unchanged.
+  if (market === 'US') {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
+      const resp = await axios.get(url, {
+        headers: { 'User-Agent': Y_UA, 'Accept': 'application/json' },
+        timeout: 8000
+      });
+      const data = fromYahooChart(resp.data, symbol);
+      if (!data) return null;
+      yqCache[key] = { data, ts: Date.now() };
+      return data;
+    } catch (err) {
+      console.error(`[YahooChart US:${symbol}] ${err.response?.status || err.message}`);
+      return null;
+    }
+  }
   const ySym = market === 'IN' ? symbol.replace('&', '%26') + '.NS' : symbol;
   const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ySym}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile`;
   try {
