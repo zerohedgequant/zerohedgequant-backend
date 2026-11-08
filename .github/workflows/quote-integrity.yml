@@ -4,6 +4,8 @@ on:
     paths:
       - "server.js"
       - "lib/quoteIntegrity.js"
+      - "lib/yahooChartQuote.js"
+      - "tests/yahooChartQuote.test.cjs"
       - "tests/quoteIntegrity.test.cjs"
       - ".github/workflows/quote-integrity.yml"
   push:
@@ -11,6 +13,8 @@ on:
     paths:
       - "server.js"
       - "lib/quoteIntegrity.js"
+      - "lib/yahooChartQuote.js"
+      - "tests/yahooChartQuote.test.cjs"
       - "tests/quoteIntegrity.test.cjs"
       - ".github/workflows/quote-integrity.yml"
 permissions:
@@ -26,4 +30,4 @@ jobs:
         with:
           node-version: "22"
       - run: node --check server.js
-      - run: node --test tests/quoteIntegrity.test.cjs
+      - run: node --test tests/quoteIntegrity.test.cjs tests/yahooChartQuote.test.cjs
