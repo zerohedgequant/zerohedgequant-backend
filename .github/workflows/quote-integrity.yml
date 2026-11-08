@@ -31,3 +31,16 @@ jobs:
           node-version: "22"
       - run: node --check server.js
       - run: node --test tests/quoteIntegrity.test.cjs tests/yahooChartQuote.test.cjs
+      - name: Probe current chart endpoint availability without exposing prices
+        continue-on-error: true
+        run: |
+          node - <<'NODE'
+          const url='https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=5d&interval=1d';
+          (async()=>{
+            const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0','Accept':'application/json'},signal:AbortSignal.timeout(8000)});
+            const j=await r.json().catch(()=>({}));
+            const meta=j?.chart?.result?.[0]?.meta;
+            console.log(JSON.stringify({providerStatus:r.status,shapeOk:!!meta,hasTime:Number.isFinite(meta?.regularMarketTime),hasPrice:Number.isFinite(meta?.regularMarketPrice)}));
+            if(!r.ok||!meta||!Number.isFinite(meta?.regularMarketTime))process.exitCode=1;
+          })().catch(e=>{console.error("Provider probe unavailable:",e.name);process.exitCode=1});
+          NODE
