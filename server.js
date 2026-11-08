@@ -938,14 +938,22 @@ app.get('/api/us-indices', withCache('us_indices', 60000, async () => {
   const out = {};
   await Promise.all(US_INDICES.map(async (idx) => {
     try {
-      const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(idx.key)}?modules=price`;
-      const resp = await yahooGet(url);
-      const pr = resp.data?.quoteSummary?.result?.[0]?.price;
-      if (!pr) return;
+      // Index quoteSummary endpoints require an unavailable Yahoo session
+      // crumb on Render. Reuse validated, timestamped chart quotes instead.
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(idx.key)}?range=5d&interval=1d`;
+      const resp = await axios.get(url, {
+        headers: { 'User-Agent': Y_UA, 'Accept': 'application/json' },
+        timeout: 8000
+      });
+      const quote = fromYahooChart(resp.data, idx.key);
+      if (!quote) return;
       out[idx.label] = {
-        value: pr.regularMarketPrice?.raw || 0,
-        change: pr.regularMarketChange?.raw || 0,
-        changePct: pr.regularMarketChangePercent?.raw != null ? +(pr.regularMarketChangePercent.raw * 100).toFixed(2) : 0
+        value: quote.price,
+        change: quote.change,
+        changePct: quote.changePct,
+        priceAsOf: quote.priceAsOf,
+        priceSource: quote.priceSource,
+        stale: quote.stale
       };
     } catch (e) { console.error(`[US idx ${idx.key}] ${e.message}`); }
   }));
