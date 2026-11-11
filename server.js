@@ -432,7 +432,7 @@ function withCache(key, ttlMs, fetchFn) {
 // ROUTES
 // ═══════════════════════════════════════════════════════
 // Public uptime probe — no auth credentials or financial account details exposed.
-app.get('/healthz', (req, res) => res.json({status:'ok', service:'alphahedgequant-market-api', uptimeSeconds:Math.floor(process.uptime())}));
+app.get('/healthz', (req, res) => res.json({status:'ok', service:'alphahedgequant-market-api', screenerQuoteMode:'upstox-bulk-v2', uptimeSeconds:Math.floor(process.uptime())}));
 
 app.get('/', (req, res) => {
   res.json({
