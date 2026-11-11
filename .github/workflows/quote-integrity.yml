@@ -5,7 +5,9 @@ on:
       - "server.js"
       - "lib/quoteIntegrity.js"
       - "lib/yahooChartQuote.js"
+      - "lib/upstoxBatchQuotes.js"
       - "tests/yahooChartQuote.test.cjs"
+      - "tests/upstoxBatchQuotes.test.cjs"
       - "tests/quoteIntegrity.test.cjs"
       - ".github/workflows/quote-integrity.yml"
   push:
@@ -14,7 +16,9 @@ on:
       - "server.js"
       - "lib/quoteIntegrity.js"
       - "lib/yahooChartQuote.js"
+      - "lib/upstoxBatchQuotes.js"
       - "tests/yahooChartQuote.test.cjs"
+      - "tests/upstoxBatchQuotes.test.cjs"
       - "tests/quoteIntegrity.test.cjs"
       - ".github/workflows/quote-integrity.yml"
 permissions:
@@ -47,7 +51,7 @@ jobs:
             if(valid!==indices.length)process.exitCode=1;
           })().catch(e=>{console.error('US index probe failed:',e.name);process.exitCode=1});
           NODE
-      - run: node --test tests/quoteIntegrity.test.cjs tests/yahooChartQuote.test.cjs
+      - run: node --test tests/quoteIntegrity.test.cjs tests/yahooChartQuote.test.cjs tests/upstoxBatchQuotes.test.cjs
       - name: Probe current chart endpoint availability without exposing prices
         continue-on-error: true
         run: |
