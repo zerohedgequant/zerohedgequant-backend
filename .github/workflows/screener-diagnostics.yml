@@ -1,0 +1,28 @@
+name: AHQ Live Screener Backend Diagnostics
+on:
+  pull_request:
+    paths:
+      - "scripts/probe-live-screener.mjs"
+      - ".github/workflows/screener-diagnostics.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server.js"
+      - "lib/upstoxBatchQuotes.js"
+      - "scripts/probe-live-screener.mjs"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Probe public market endpoints and auth token status without reading credentials
+        run: node scripts/probe-live-screener.mjs
