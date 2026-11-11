@@ -4,6 +4,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const {isUsableQuote} = require('./lib/quoteIntegrity');
 const {fromYahooChart} = require('./lib/yahooChartQuote');
+const {parseBatchQuotes} = require('./lib/upstoxBatchQuotes');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -90,45 +91,57 @@ async function upstoxFetch(endpoint, params = {}) {
   }
 }
 
-// Fetch quotes one instrument at a time (batched commas break Upstox URL encoding)
-async function fetchQuotesIndividually(symbols, parallel = 3) {
-  const out = {};
-  for (let i = 0; i < symbols.length; i += parallel) {
-    const batch = symbols.slice(i, i + parallel);
-    const results = await Promise.all(batch.map(async (sym) => {
-      const url = `${CONFIG.baseUrl}/market-quote/quotes?instrument_key=NSE_EQ%7C${STOCKS[sym].isin}`;
-      try {
-        const r = await axios.get(url, {
-          headers: { 'Authorization': `Bearer ${CONFIG.accessToken}`, 'Accept': 'application/json' },
-          timeout: 12000
-        });
-        return { sym, val: r.data?.data ? Object.values(r.data.data)[0] : null };
-      } catch (err) {
-        console.error(`[Upstox quote ${sym}] ${err.response?.status}: ${err.response?.data?.errors?.[0]?.message || err.message}`);
-        return { sym, val: null };
-      }
-    }));
-    for (const { sym, val } of results) {
-      if (!val || !val.last_price) continue;
-      const prevClose = val.ohlc?.close || 0;
-      let pct = val.percentage_change || 0;
-      if (!pct && prevClose) pct = +(((val.last_price - prevClose) / prevClose) * 100).toFixed(2);
-      out[sym] = {
-        price: val.last_price, change: val.net_change || (prevClose ? +(val.last_price - prevClose).toFixed(2) : 0),
-        changePct: pct, volume: val.volume || 0,
-        open: val.ohlc?.open || 0, high: val.ohlc?.high || 0, low: val.ohlc?.low || 0, prevClose
-      };
+// One Upstox v2 full-market-quote call supports up to 500 instruments.
+// This replaces 50 separate requests and 16 intentional 650ms sleeps: that
+// old path could exceed the frontend gateway's 15s timeout. The quote contract
+// is parsed by a tested helper; no invented prices or market timestamps.
+let upstoxQuoteRetryAt=0;
+async function fetchQuotesIndividually(symbols) {
+  const out={};
+  if (!CONFIG.accessToken || Date.now() < upstoxQuoteRetryAt) return out;
+  const selected=[...new Set(symbols)].filter(sym=>STOCKS[sym]?.isin).slice(0,500);
+  if (!selected.length) return out;
+  const quoteUrlFor=list=>CONFIG.baseUrl+'/market-quote/quotes?instrument_key='+
+    list.map(sym=>encodeURIComponent('NSE_EQ|'+STOCKS[sym].isin)).join(',');
+  const headers={Authorization:'Bearer '+CONFIG.accessToken,Accept:'application/json'};
+  const fetchBulk=async(list,timeout=8500)=>{
+    const response=await axios.get(quoteUrlFor(list),{headers,timeout});
+    return parseBatchQuotes(response.data?.data,list,STOCKS);
+  };
+  try {
+    const quotes=await fetchBulk(selected);
+    if (Object.keys(quotes).length) {
+      console.log('[Upstox batch] '+Object.keys(quotes).length+'/'+selected.length+' usable equity quotes');
+      return quotes;
     }
-    if (i + parallel < symbols.length) await new Promise(r => setTimeout(r, 650));
+    // Upstream success with no usable quotes must NOT be represented as live.
+    console.warn('[Upstox batch] No usable quotes returned');
+    return out;
+  } catch (err) {
+    const status=err.response?.status;
+    if(status===401||status===403){
+      upstoxQuoteRetryAt=Date.now()+60000;
+      console.warn('[Upstox batch] Authorization rejected. Reconnect Upstox; suspending repeated quote retries.');
+      return out;
+    }
+    if(status===429||status>=500||err.code==='ECONNABORTED'){
+      upstoxQuoteRetryAt=Date.now()+15000;
+      console.warn('[Upstox batch] Quote API temporarily unavailable: '+(status||err.code||'network'));
+      return out;
+    }
+    // A single invalid/retired instrument may cause the 500-key API request
+    // to reject. On a 400/422 only, try bounded smaller groups concurrently.
+    if(status===400||status===422){
+      const chunks=[];
+      for(let i=0;i<selected.length;i+=10)chunks.push(selected.slice(i,i+10));
+      const results=await Promise.allSettled(chunks.map(s=>fetchBulk(s,6500)));
+      for(const result of results)if(result.status==='fulfilled')Object.assign(out,result.value);
+      console.warn('[Upstox batch] Recovered '+Object.keys(out).length+'/'+selected.length+' quotes after invalid-instrument batch response');
+      return out;
+    }
+    console.warn('[Upstox batch] Quote request failed: '+(status||err.code||'network'));
+    return out;
   }
-  return out;
-}
-
-function matchSymbol(rawKey, batch) {
-  for (const sym of batch) {
-    if (rawKey.includes(STOCKS[sym].isin)) return sym;
-  }
-  return null;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1010,6 +1023,7 @@ app.get('/auth/callback', async (req, res) => {
     );
     if (!r.data || !r.data.access_token) throw new Error('No access_token in response');
     CONFIG.accessToken = r.data.access_token;   // live swap — no restart needed
+    upstoxQuoteRetryAt=0;
     AUTH.updatedAt = new Date().toISOString();
     cache.indices = null; cache.market = null; cache.screener = null;  // bust stale zero-price caches
     res.send(
