@@ -722,7 +722,9 @@ app.get('/api/screener', withCache('screener', 45000, async () => {
       symbol: sym, name: info.name, sector: info.sector, industry: info.industry,
       exchange: 'NSE', country: 'India',
       priceSrc,
-      // Live price (Upstox) with Yahoo fallback post-market
+      // Quote time is the upstream tick timestamp, not a cache/HTTP receipt time.
+      priceAsOf: hasUpstox ? (live.priceAsOf || null) : (yahoo.priceAsOf || null),
+      // Prefer authenticated Upstox data; Yahoo is only an indicative fallback.
       price,
       change,
       changePct,
