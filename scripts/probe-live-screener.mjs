@@ -15,7 +15,8 @@ async function probe(name,path,timeoutMs){
     stale:data?.stale===true?true:data?.stale===false?false:null,
     tokenSet: name==="auth"?data?.tokenSet===true:null,
     tokenUpdatedAt:name==="auth"&&typeof data?.updatedAt==="string"?data.updatedAt:null,
-    errorCode:!response.ok?String(data?.errorCode||"HTTP_ERROR").slice(0,45):null};
+    errorCode:!response.ok?String(data?.errorCode||"HTTP_ERROR").slice(0,45):null,
+    bulkQuoteVersion:name==="health"?data?.screenerQuoteMode||null:null};
   out.push(result);console.log("AHQ_BACKEND_DIAGNOSTIC",JSON.stringify(result));
  }catch(err){const result={name,status:"connection_failure",ms:Date.now()-started,
    error:err.name==="TimeoutError"?"request timed out":err.name==="AbortError"?"aborted":"connection failure"};
