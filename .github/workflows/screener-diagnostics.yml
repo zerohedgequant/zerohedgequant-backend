@@ -4,6 +4,12 @@ on:
     paths:
       - "scripts/probe-live-screener.mjs"
       - ".github/workflows/screener-diagnostics.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server.js"
+      - "lib/upstoxBatchQuotes.js"
+      - "scripts/probe-live-screener.mjs"
   workflow_dispatch:
 permissions:
   contents: read
