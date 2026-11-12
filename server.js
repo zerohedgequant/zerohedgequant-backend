@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const {isUsableQuote} = require('./lib/quoteIntegrity');
 const {fromYahooChart} = require('./lib/yahooChartQuote');
 const {parseBatchQuotes} = require('./lib/upstoxBatchQuotes');
+const {collectFnoSymbols} = require('./lib/terminalFnoUniverse');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -514,12 +515,8 @@ async function loadTerminalUniverse(){
   const items=rows.filter(x=>x.segment==='NSE_EQ'&&x.instrument_type==='EQ'&&/^NSE_EQ\\|INE[A-Z0-9]{9}$/.test(x.instrument_key)&&/^[A-Z0-9&_.-]{1,40}$/.test(x.trading_symbol))
    .map(x=>({symbol:x.trading_symbol,name:x.short_name||x.name||x.trading_symbol,key:x.instrument_key}));
   const bySymbol=new Map(items.map(x=>[x.symbol,x]));
-  // Restrict equity options to currently listed NSE_FO contracts in the BOD master.
-  const fnoSet=new Set(rows.filter(x=>x.segment==='NSE_FO'&&
-    (x.instrument_type==='CE'||x.instrument_type==='PE')&&x.underlying_type==='EQUITY')
-    .map(x=>String(x.underlying_symbol||'').trim().toUpperCase())
-    .filter(x=>bySymbol.has(x)));
-  const fnoSymbols=[...fnoSet].sort();
+  const fnoSymbols=collectFnoSymbols(rows,bySymbol);
+  const fnoSet=new Set(fnoSymbols);
   terminalUniverse={items,bySymbol,fnoSymbols,fnoSet,expires:Date.now()+6*3600000,loading:null};
   return terminalUniverse;
  })().catch(err=>{terminalUniverse.loading=null;if(terminalUniverse.items.length)return terminalUniverse;throw err});
