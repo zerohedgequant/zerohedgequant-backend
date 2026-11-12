@@ -25,9 +25,10 @@ async function probe(name,path,timeoutMs){
 await probe("health","/healthz",55000);
 await probe("auth","/auth/status",25000);
 await probe("nse_screener","/api/screener",85000);
+await probe("fno_universe","/api/terminal/fno-universe",35000);
 await probe("nse_indices","/api/indices",30000);
 await probe("us_screener","/api/us-screener",55000);
 await probe("us_indices","/api/us-indices",25000);
-const failed=out.filter(x=>x.status!==200||x.name.includes("screener")&&(x.rows??0)===0||x.name.endsWith("indices")&&(x.indexCount??0)===0);
+const failed=out.filter(x=>x.status!==200||(x.name.includes("screener")||x.name==="fno_universe")&&(x.rows??0)===0||x.name.endsWith("indices")&&(x.indexCount??0)===0);
 console.log("AHQ_BACKEND_SUMMARY",JSON.stringify({tested:out.length,failed:failed.map(x=>x.name),durationMs:out.reduce((n,x)=>n+x.ms,0)}));
 if(failed.length)process.exitCode=1;
