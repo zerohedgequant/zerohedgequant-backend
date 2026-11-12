@@ -28,7 +28,7 @@ test("invalid symbols and missing instrument registry do not invent F&O names",(
  assert.deepEqual(collectFnoSymbols(null,cash),[]);
 });
 test("backend contract supports all NSE cash symbols but only eligible stock-option underlyings",()=>{
- const fs=require("node:fs"),server=fs.readFileSync(new URL("../server.js",import.meta.url),"utf8");
+ const fs=require("node:fs"),server=fs.readFileSync(require("node:path").join(__dirname,"../server.js"),"utf8");
  assert.match(server,/loadTerminalUniverse/);
  assert.match(server,/api\/terminal\/instruments/);
  assert.match(server,/api\/terminal\/fno-universe/);
