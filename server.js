@@ -503,7 +503,7 @@ app.get('/api/market-data', withCache('market', 45000, async () => {
 // NSE cash-equity universe from Upstox daily instrument master, cached in memory.
 // Search and keys derive from actual exchange instruments, not a hard-coded shortlist.
 const zlib = require('zlib');
-let terminalUniverse={expires:0,items:[],bySymbol:new Map(),loading:null};
+let terminalUniverse={expires:0,items:[],bySymbol:new Map(),fnoSymbols:[],fnoSet:new Set(),loading:null};
 async function loadTerminalUniverse(){
  if(terminalUniverse.items.length&&Date.now()<terminalUniverse.expires)return terminalUniverse;
  if(terminalUniverse.loading)return terminalUniverse.loading;
@@ -514,7 +514,13 @@ async function loadTerminalUniverse(){
   const items=rows.filter(x=>x.segment==='NSE_EQ'&&x.instrument_type==='EQ'&&/^NSE_EQ\\|INE[A-Z0-9]{9}$/.test(x.instrument_key)&&/^[A-Z0-9&_.-]{1,40}$/.test(x.trading_symbol))
    .map(x=>({symbol:x.trading_symbol,name:x.short_name||x.name||x.trading_symbol,key:x.instrument_key}));
   const bySymbol=new Map(items.map(x=>[x.symbol,x]));
-  terminalUniverse={items,bySymbol,expires:Date.now()+6*3600000,loading:null};
+  // Restrict equity options to currently listed NSE_FO contracts in the BOD master.
+  const fnoSet=new Set(rows.filter(x=>x.segment==='NSE_FO'&&
+    (x.instrument_type==='CE'||x.instrument_type==='PE')&&x.underlying_type==='EQUITY')
+    .map(x=>String(x.underlying_symbol||'').trim().toUpperCase())
+    .filter(x=>bySymbol.has(x)));
+  const fnoSymbols=[...fnoSet].sort();
+  terminalUniverse={items,bySymbol,fnoSymbols,fnoSet,expires:Date.now()+6*3600000,loading:null};
   return terminalUniverse;
  })().catch(err=>{terminalUniverse.loading=null;if(terminalUniverse.items.length)return terminalUniverse;throw err});
  return terminalUniverse.loading;
@@ -525,6 +531,16 @@ app.get('/api/terminal/instruments',async(req,res)=>{
  const matches=q?universe.items.filter(x=>x.symbol!==q&&(x.symbol.startsWith(q)||x.name.toUpperCase().includes(q))).slice(0,19):universe.items.slice(0,20);
  res.json({success:true,data:[...exact,...matches].slice(0,20),total:universe.items.length,source:'Upstox NSE BOD instruments'});
  }catch{res.status(503).json({success:false,error:'NSE instrument list temporarily unavailable'})}
+});
+// Expose the current *eligible* F&O ticker list, not exchange-wide live coverage.
+app.get('/api/terminal/fno-universe',async(req,res)=>{
+ try{
+  const universe=await loadTerminalUniverse();
+  res.set('Cache-Control','public,max-age=120');
+  return res.json({success:true,data:universe.fnoSymbols.map(symbol=>({symbol})),
+    count:universe.fnoSymbols.length,asOf:'NSE BOD instrument master',
+    coverage:'NSE equity-option underlyings only'});
+ }catch{return res.status(503).json({success:false,error:'F&O instrument list temporarily unavailable'});}
 });
 const terminalQuoteCache=new Map();
 app.get('/api/terminal/quote/:symbol',async(req,res)=>{
@@ -539,11 +555,11 @@ app.get('/api/terminal/quote/:symbol',async(req,res)=>{
  if(hit&&Date.now()-hit.at<1000)return res.json(hit.data);
  const response=await upstoxFetch('/market-quote/quotes',{instrument_key:inst.key});
  const raw=response?.data?Object.values(response.data)[0]:null;
- if(!raw)return res.status(503).json({success:false,error:'Upstox quote unavailable; check authentication'});
+ if(!isUsableQuote(raw))return res.status(503).json({success:false,error:'Verified Upstox quote unavailable; reconnect and retry',code:'MARKET_QUOTE_UNAVAILABLE'});
  const level=x=>({price:Number(x.price)||0,quantity:Number(x.quantity)||0,orders:Number(x.orders)||0});
  const data={success:true,source:'Upstox REST full quote',symbol,name:inst.name,
   timestamp:raw.last_trade_time||raw.timestamp||null,
-  price:Number(raw.last_price)||0,volume:Number(raw.volume)||0,change:Number(raw.net_change)||0,
+  price:Number(raw.last_price),volume:Number.isFinite(Number(raw.volume))?Number(raw.volume):null,change:Number.isFinite(Number(raw.net_change))?Number(raw.net_change):null,
   dayHigh:Number(raw.ohlc?.high)||0,dayLow:Number(raw.ohlc?.low)||0,
   bids:(raw.depth?.buy||[]).filter(x=>Number(x.price)>0).slice(0,5).map(level),
   asks:(raw.depth?.sell||[]).filter(x=>Number(x.price)>0).slice(0,5).map(level),
@@ -803,8 +819,20 @@ app.get('/api/option-chain/:underlying', async (req, res) => {
   if (ul === 'NIFTY' || ul === 'NIFTY50') instKeyOC = 'NSE_INDEX|Nifty 50';
   else if (ul === 'BANKNIFTY') instKeyOC = 'NSE_INDEX|Nifty Bank';
   else if (ul === 'FINNIFTY') instKeyOC = 'NSE_INDEX|Nifty Financial Services';
-  else if (STOCKS[ul]) instKeyOC = `NSE_EQ|${STOCKS[ul].isin}`;
-  else return res.status(404).json({ success: false, error: 'Unknown underlying' });
+  else if (!/^[A-Z0-9&_.-]{1,40}$/.test(ul))return res.status(400).json({success:false,error:'Invalid underlying'});
+  else {
+    // Resolve ALL currently eligible NSE equity-option underlyings, rather
+    // than the legacy 50-stock hardcoded market watchlist.
+    try{
+      const instruments=await loadTerminalUniverse();
+      if(instruments.fnoSet.has(ul))instKeyOC=instruments.bySymbol.get(ul)?.key;
+      else return res.status(404).json({success:false,error:ul+' has no active NSE F&O contracts in the current instrument master',code:'NOT_FNO_ELIGIBLE'});
+    }catch{
+      if(STOCKS[ul])instKeyOC='NSE_EQ|'+STOCKS[ul].isin;
+      else return res.status(503).json({success:false,error:'F&O instrument registry unavailable',code:'FNO_REGISTRY_UNAVAILABLE'});
+    }
+  }
+  if(!instKeyOC)return res.status(404).json({success:false,error:'NSE underlying instrument not found'});
 
   // Never represent an invalid/expired Upstox token as an unsupported option contract.
   if (!CONFIG.accessToken) {
