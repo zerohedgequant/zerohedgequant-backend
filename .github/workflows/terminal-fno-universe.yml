@@ -1,0 +1,30 @@
+name: Quant Terminal NSE F&O Universe
+on:
+  pull_request:
+    paths:
+      - "server.js"
+      - "lib/terminalFnoUniverse.js"
+      - "tests/terminalFnoUniverse.test.cjs"
+      - ".github/workflows/terminal-fno-universe.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server.js"
+      - "lib/terminalFnoUniverse.js"
+      - "tests/terminalFnoUniverse.test.cjs"
+      - ".github/workflows/terminal-fno-universe.yml"
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check server.js
+      - run: node --test tests/terminalFnoUniverse.test.cjs tests/upstoxBatchQuotes.test.cjs tests/quoteIntegrity.test.cjs
