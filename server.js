@@ -6,6 +6,7 @@ const {isUsableQuote} = require('./lib/quoteIntegrity');
 const {fromYahooChart} = require('./lib/yahooChartQuote');
 const {parseBatchQuotes} = require('./lib/upstoxBatchQuotes');
 const {collectFnoSymbols} = require('./lib/terminalFnoUniverse');
+const {normalizeYahooClassification} = require('./lib/providerClassification');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -298,24 +299,23 @@ const yahooClassificationQueued = new Set();
 let yahooClassificationWorker = false;
 let yahooClassificationRetryAt = 0;
 const YAHOO_CLASSIFICATION_TTL = 30 * 24 * 60 * 60 * 1000;
+const YAHOO_CLASSIFICATION_PARTIAL_TTL = 7 * 24 * 60 * 60 * 1000;
+const YAHOO_CLASSIFICATION_EMPTY_TTL = 24 * 60 * 60 * 1000;
+const YAHOO_CLASSIFICATION_ERROR_TTL = 15 * 60 * 1000;
 async function fetchYahooClassification(symbol) {
   const cached = yahooClassificationCache.get(symbol);
-  if (cached && Date.now() - cached.ts < YAHOO_CLASSIFICATION_TTL) return cached.data;
+  const cacheTtl = cached?.ttl ?? YAHOO_CLASSIFICATION_TTL;
+  if (cached && Date.now() - cached.ts < cacheTtl) return cached.data;
   const yahooSymbol = symbol.replace('&', '%26') + '.NS';
   const url = 'https://query2.finance.yahoo.com/v10/finance/quoteSummary/' +
     yahooSymbol + '?modules=assetProfile';
   const response = await yahooGet(url);
   const profile = response.data?.quoteSummary?.result?.[0]?.assetProfile || {};
-  const sector = typeof profile.sector === 'string' && profile.sector.trim() ? profile.sector.trim() : null;
-  const industry = typeof profile.industry === 'string' && profile.industry.trim() ? profile.industry.trim() : null;
-  const data = {
-    sector: sector || 'Unclassified',
-    industry: industry || 'Unclassified',
-    classificationProvider: sector || industry ? 'Yahoo Finance' : null,
-    classificationStatus: sector && industry ? 'provider_verified' : sector || industry ? 'partial' : 'unclassified',
-    classificationAsOf: new Date().toISOString()
-  };
-  yahooClassificationCache.set(symbol, { data, ts: Date.now() });
+  const data = normalizeYahooClassification(profile, {}, new Date().toISOString());
+  const ttl = data.classificationStatus === 'provider_verified' ? YAHOO_CLASSIFICATION_TTL
+    : data.classificationStatus === 'partial' ? YAHOO_CLASSIFICATION_PARTIAL_TTL
+    : YAHOO_CLASSIFICATION_EMPTY_TTL;
+  yahooClassificationCache.set(symbol, { data, ts: Date.now(), ttl });
   return data;
 }
 async function processYahooClassificationBatch() {
@@ -337,11 +337,12 @@ async function processYahooClassificationBatch() {
           yahooClassificationQueued.add(symbol);
           break;
         }
-        // Failed or absent provider classifications stay explicitly unclassified.
+        // A failed provider request is not a permanent classification decision.
+        // Retry transient failures after 15 minutes and genuine missing mappings after 24 hours.
+        const ttl = !status || status >= 500 ? YAHOO_CLASSIFICATION_ERROR_TTL : YAHOO_CLASSIFICATION_EMPTY_TTL;
         yahooClassificationCache.set(symbol, {
-          data: { sector: 'Unclassified', industry: 'Unclassified', classificationProvider: null,
-            classificationStatus: 'unclassified', classificationAsOf: new Date().toISOString() },
-          ts: Date.now()
+          data: normalizeYahooClassification({}, {}, new Date().toISOString()),
+          ts: Date.now(), ttl
         });
       }
       processed++;
@@ -355,7 +356,8 @@ function scheduleYahooClassifications(items) {
   for (const item of items) {
     const symbol = item.symbol;
     const cached = yahooClassificationCache.get(symbol);
-    if ((!cached || Date.now() - cached.ts >= YAHOO_CLASSIFICATION_TTL) && !yahooClassificationQueued.has(symbol)) {
+    const ttl = cached?.ttl ?? YAHOO_CLASSIFICATION_TTL;
+    if ((!cached || Date.now() - cached.ts >= ttl) && !yahooClassificationQueued.has(symbol)) {
       yahooClassificationQueue.push(symbol);
       yahooClassificationQueued.add(symbol);
     }
@@ -857,6 +859,7 @@ app.get('/api/screener', withCache('screener', 45000, async () => {
     const yahoo = yahooCache[symbol]?.data || {};
     const yahooQuote = yqCache['IN:' + symbol]?.data || {};
     const classification = yahooClassificationCache.get(symbol)?.data || {};
+    const providerClassification = normalizeYahooClassification(classification, yahoo, classification.classificationAsOf || null);
     const hasUpstox = Number(live.price) > 0;
     const yahooPrice = Number(yahoo.yPrice || yahooQuote.price) > 0 ? Number(yahoo.yPrice || yahooQuote.price) : null;
     const price = hasUpstox ? live.price : yahooPrice;
@@ -864,20 +867,12 @@ app.get('/api/screener', withCache('screener', 45000, async () => {
     const previousClose = hasUpstox ? live.prevClose : (yahoo.yPrevClose || yahooQuote.prevClose || null);
     const changePct = hasUpstox ? live.changePct : (yahoo.yChangePct ?? yahooQuote.changePct ?? null);
     const change = hasUpstox ? live.change : (price != null && previousClose != null ? +(price - previousClose).toFixed(2) : null);
-    const sector = classification.sector && classification.sector !== 'Unclassified' ? classification.sector : (yahoo.sector || 'Unclassified');
-    const industry = classification.industry && classification.industry !== 'Unclassified' ? classification.industry : (yahoo.industry || 'Unclassified');
-    const hasProviderClassification = (sector !== 'Unclassified' || industry !== 'Unclassified') &&
-      (classification.classificationProvider === 'Yahoo Finance' || yahoo.classificationProvider === 'Yahoo Finance');
-    const classificationStatus = classification.classificationStatus && classification.classificationStatus !== 'unclassified'
-      ? classification.classificationStatus
-      : sector !== 'Unclassified' && industry !== 'Unclassified' ? 'provider_verified'
-      : sector !== 'Unclassified' || industry !== 'Unclassified' ? 'partial' : 'unclassified';
     return {
       symbol, name: item.name || STOCKS[symbol]?.name || symbol,
-      sector, industry,
-      classificationProvider: hasProviderClassification ? 'Yahoo Finance' : null,
-      classificationStatus,
-      classificationAsOf: classification.classificationAsOf || null,
+      sector: providerClassification.sector, industry: providerClassification.industry,
+      classificationProvider: providerClassification.classificationProvider,
+      classificationStatus: providerClassification.classificationStatus,
+      classificationAsOf: providerClassification.classificationAsOf || null,
       exchange: 'NSE', country: 'India',
       priceSrc, priceAsOf: hasUpstox ? (live.priceAsOf || null) : (yahooQuote.priceAsOf || null),
       price: price ?? null, change: change ?? null, changePct: changePct ?? null,
