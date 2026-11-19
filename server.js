@@ -858,15 +858,19 @@ app.get('/api/screener', withCache('screener', 45000, async () => {
     const previousClose = hasUpstox ? live.prevClose : (yahoo.yPrevClose || yahooQuote.prevClose || null);
     const changePct = hasUpstox ? live.changePct : (yahoo.yChangePct ?? yahooQuote.changePct ?? null);
     const change = hasUpstox ? live.change : (price != null && previousClose != null ? +(price - previousClose).toFixed(2) : null);
-    const sector = classification.sector || yahoo.sector || 'Unclassified';
-    const industry = classification.industry || yahoo.industry || 'Unclassified';
+    const sector = classification.sector && classification.sector !== 'Unclassified' ? classification.sector : (yahoo.sector || 'Unclassified');
+    const industry = classification.industry && classification.industry !== 'Unclassified' ? classification.industry : (yahoo.industry || 'Unclassified');
     const hasProviderClassification = (sector !== 'Unclassified' || industry !== 'Unclassified') &&
       (classification.classificationProvider === 'Yahoo Finance' || yahoo.classificationProvider === 'Yahoo Finance');
+    const classificationStatus = classification.classificationStatus && classification.classificationStatus !== 'unclassified'
+      ? classification.classificationStatus
+      : sector !== 'Unclassified' && industry !== 'Unclassified' ? 'provider_verified'
+      : sector !== 'Unclassified' || industry !== 'Unclassified' ? 'partial' : 'unclassified';
     return {
       symbol, name: item.name || STOCKS[symbol]?.name || symbol,
       sector, industry,
       classificationProvider: hasProviderClassification ? 'Yahoo Finance' : null,
-      classificationStatus: classification.classificationStatus || (hasProviderClassification ? 'provider_verified' : 'unclassified'),
+      classificationStatus,
       classificationAsOf: classification.classificationAsOf || null,
       exchange: 'NSE', country: 'India',
       priceSrc, priceAsOf: hasUpstox ? (live.priceAsOf || null) : (yahooQuote.priceAsOf || null),
