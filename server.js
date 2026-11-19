@@ -157,7 +157,7 @@ async function fetchYahooFundamentals(symbol) {
   if (cached && Date.now() - cached.ts < YAHOO_TTL) return cached.data;
 
   const yahooSym = symbol.replace('&', '%26') + '.NS';
-  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSym}?modules=price,summaryDetail,defaultKeyStatistics,financialData`;
+  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSym}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile`;
 
   try {
     const resp = await yahooGet(url);
@@ -169,10 +169,14 @@ async function fetchYahooFundamentals(symbol) {
     const ks = result.defaultKeyStatistics || {};
     const fd = result.financialData || {};
     const pr = result.price || {};
+    const profile = result.assetProfile || {};
 
     const extract = (obj) => obj?.raw ?? obj?.fmt ?? null;
 
     const data = {
+      sector: typeof profile.sector === 'string' && profile.sector.trim() ? profile.sector.trim() : null,
+      industry: typeof profile.industry === 'string' && profile.industry.trim() ? profile.industry.trim() : null,
+      classificationProvider: profile.sector || profile.industry ? 'Yahoo Finance' : null,
       // Live-ish price (Yahoo) used as fallback when Upstox is post-market/0
       yPrice: extract(pr.regularMarketPrice),
       yChangePct: extract(pr.regularMarketChangePercent) != null ? +(extract(pr.regularMarketChangePercent) * 100).toFixed(2) : null,
@@ -284,6 +288,80 @@ async function yahooGet(url) {
       });
     }
     throw err;
+  }
+}
+
+// Yahoo Finance provider classification. No locally guessed sector labels are used by the NSE screener.
+const yahooClassificationCache = new Map();
+const yahooClassificationQueue = [];
+const yahooClassificationQueued = new Set();
+let yahooClassificationWorker = false;
+let yahooClassificationRetryAt = 0;
+const YAHOO_CLASSIFICATION_TTL = 30 * 24 * 60 * 60 * 1000;
+async function fetchYahooClassification(symbol) {
+  const cached = yahooClassificationCache.get(symbol);
+  if (cached && Date.now() - cached.ts < YAHOO_CLASSIFICATION_TTL) return cached.data;
+  const yahooSymbol = symbol.replace('&', '%26') + '.NS';
+  const url = 'https://query2.finance.yahoo.com/v10/finance/quoteSummary/' +
+    yahooSymbol + '?modules=assetProfile';
+  const response = await yahooGet(url);
+  const profile = response.data?.quoteSummary?.result?.[0]?.assetProfile || {};
+  const sector = typeof profile.sector === 'string' && profile.sector.trim() ? profile.sector.trim() : null;
+  const industry = typeof profile.industry === 'string' && profile.industry.trim() ? profile.industry.trim() : null;
+  const data = {
+    sector: sector || 'Unclassified',
+    industry: industry || 'Unclassified',
+    classificationProvider: sector || industry ? 'Yahoo Finance' : null,
+    classificationStatus: sector && industry ? 'provider_verified' : sector || industry ? 'partial' : 'unclassified',
+    classificationAsOf: new Date().toISOString()
+  };
+  yahooClassificationCache.set(symbol, { data, ts: Date.now() });
+  return data;
+}
+async function processYahooClassificationBatch() {
+  if (yahooClassificationWorker || Date.now() < yahooClassificationRetryAt) return;
+  yahooClassificationWorker = true;
+  let processed = 0;
+  try {
+    // Bounded work per screener refresh; later refreshes continue the queue.
+    while (yahooClassificationQueue.length && processed < 80) {
+      const symbol = yahooClassificationQueue.shift();
+      yahooClassificationQueued.delete(symbol);
+      try {
+        await fetchYahooClassification(symbol);
+      } catch (error) {
+        const status = error.response?.status;
+        if (status === 429 || status === 401 || status === 403) {
+          yahooClassificationRetryAt = Date.now() + 15 * 60 * 1000;
+          yahooClassificationQueue.unshift(symbol);
+          yahooClassificationQueued.add(symbol);
+          break;
+        }
+        // Failed or absent provider classifications stay explicitly unclassified.
+        yahooClassificationCache.set(symbol, {
+          data: { sector: 'Unclassified', industry: 'Unclassified', classificationProvider: null,
+            classificationStatus: 'unclassified', classificationAsOf: new Date().toISOString() },
+          ts: Date.now()
+        });
+      }
+      processed++;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  } finally {
+    yahooClassificationWorker = false;
+  }
+}
+function scheduleYahooClassifications(items) {
+  for (const item of items) {
+    const symbol = item.symbol;
+    const cached = yahooClassificationCache.get(symbol);
+    if ((!cached || Date.now() - cached.ts >= YAHOO_CLASSIFICATION_TTL) && !yahooClassificationQueued.has(symbol)) {
+      yahooClassificationQueue.push(symbol);
+      yahooClassificationQueued.add(symbol);
+    }
+  }
+  if (yahooClassificationQueue.length && !yahooClassificationWorker && Date.now() >= yahooClassificationRetryAt) {
+    setTimeout(() => processYahooClassificationBatch().catch(() => {}), 0);
   }
 }
 
@@ -522,6 +600,54 @@ async function loadTerminalUniverse(){
  })().catch(err=>{terminalUniverse.loading=null;if(terminalUniverse.items.length)return terminalUniverse;throw err});
  return terminalUniverse.loading;
 }
+// Fetch authenticated Upstox quotes for the complete current NSE equity instrument master.
+// The provider accepts at most 500 instrument keys per request; missing quotes remain null.
+async function fetchQuotesForItems(items) {
+  const out = {};
+  if (!CONFIG.accessToken || Date.now() < upstoxQuoteRetryAt) return out;
+  const eligible = items.filter(item => item?.key && item.key.startsWith('NSE_EQ|'));
+  const headers = { Authorization: 'Bearer ' + CONFIG.accessToken, Accept: 'application/json' };
+  for (let offset = 0; offset < eligible.length; offset += 500) {
+    const batch = eligible.slice(offset, offset + 500);
+    const symbols = batch.map(item => item.symbol);
+    const stockMap = Object.fromEntries(batch.map(item => [item.symbol, { isin: item.key.split('|').at(-1) }]));
+    const query = batch.map(item => encodeURIComponent(item.key)).join(',');
+    try {
+      const response = await axios.get(CONFIG.baseUrl + '/market-quote/quotes?instrument_key=' + query,
+        { headers, timeout: 8500 });
+      Object.assign(out, parseBatchQuotes(response.data?.data, symbols, stockMap));
+    } catch (error) {
+      const status = error.response?.status;
+      if (status === 401 || status === 403) {
+        upstoxQuoteRetryAt = Date.now() + 60000;
+        console.warn('[Upstox screener] Authorization rejected; quote fields will remain unavailable.');
+        break;
+      }
+      if (status === 429 || status >= 500 || error.code === 'ECONNABORTED') {
+        upstoxQuoteRetryAt = Date.now() + 15000;
+        console.warn('[Upstox screener] Provider temporarily unavailable: ' + (status || error.code || 'network'));
+        break;
+      }
+      if (status === 400 || status === 422) {
+        // A retired instrument can invalidate a large batch. Recover with smaller, bounded requests.
+        const chunks = [];
+        for (let i = 0; i < batch.length; i += 50) chunks.push(batch.slice(i, i + 50));
+        const results = await Promise.allSettled(chunks.map(async small => {
+          const keys = small.map(item => encodeURIComponent(item.key)).join(',');
+          const smallMap = Object.fromEntries(small.map(item => [item.symbol, { isin: item.key.split('|').at(-1) }]));
+          const response = await axios.get(CONFIG.baseUrl + '/market-quote/quotes?instrument_key=' + keys,
+            { headers, timeout: 6500 });
+          return parseBatchQuotes(response.data?.data, small.map(item => item.symbol), smallMap);
+        }));
+        for (const result of results) if (result.status === 'fulfilled') Object.assign(out, result.value);
+        continue;
+      }
+      console.warn('[Upstox screener] Batch failed: ' + (status || error.code || 'network'));
+    }
+  }
+  return out;
+}
+
 app.get('/api/terminal/instruments',async(req,res)=>{
  const q=String(req.query.q||'').toUpperCase().trim().slice(0,60);
  try{const universe=await loadTerminalUniverse();const exact=q?universe.items.filter(x=>x.symbol===q):[];
@@ -703,93 +829,70 @@ app.get('/api/search', (req, res) => {
   res.json({ success: true, data: results });
 });
 
-// ── SCREENER (real prices + Yahoo fundamentals where available) ──
+// ── FULL NSE SCREENER: current Upstox equity master + provider quotes/classifications ──
 app.get('/api/screener', withCache('screener', 45000, async () => {
-  // Get live prices
-  let liveData = cache.market?.data || {};
-  const hasLive = Object.values(liveData).some(s => s.price > 0);
-  const marketCacheAge = Date.now() - (cache.market?.ts || 0);
-  if (!hasLive || marketCacheAge > 45000) {
-    liveData = await fetchQuotesIndividually(Object.keys(STOCKS));
+  let universe;
+  try {
+    universe = await loadTerminalUniverse();
+  } catch (error) {
+    console.warn('[Screener] NSE instrument master unavailable; returning the known core universe without inventing additional symbols.');
+    const fallback = Object.entries(STOCKS).map(([symbol, info]) => ({
+      symbol, name: info.name, key: info.isin ? 'NSE_EQ|' + info.isin : null
+    }));
+    universe = { items: fallback };
   }
-
-  // Trigger background Yahoo fetch if not done
-  if (Object.keys(yahooCache).length < Object.keys(STOCKS).length) {
-    backgroundFetchFundamentals();
-  }
-
-  const coreRows = Object.entries(STOCKS).map(([sym, info]) => {
-    const live = liveData[sym] || {};
-    const yahoo = yahooCache[sym]?.data || {};
-
-    // Prefer live Upstox price; fall back to Yahoo when market is closed / Upstox returns 0.
-    const hasUpstox = (live.price || 0) > 0;
-    const price = hasUpstox ? live.price : (yahoo.yPrice || 0);
-    const changePct = hasUpstox ? (live.changePct || 0) : (yahoo.yChangePct ?? 0);
-    const prevClose = hasUpstox ? (live.prevClose || 0) : (yahoo.yPrevClose || 0);
-    const change = hasUpstox ? (live.change || 0)
-      : (yahoo.yPrice && yahoo.yPrevClose ? +(yahoo.yPrice - yahoo.yPrevClose).toFixed(2) : 0);
-    const priceSrc = hasUpstox ? 'Upstox' : (yahoo.yPrice ? 'Yahoo' : 'NA');
-
+  const items = universe.items || [];
+  scheduleYahooClassifications(items);
+  if (Object.keys(yahooCache).length < Object.keys(STOCKS).length) backgroundFetchFundamentals();
+  const liveData = await fetchQuotesForItems(items);
+  const rows = items.map(item => {
+    const symbol = item.symbol;
+    const live = liveData[symbol] || {};
+    const yahoo = yahooCache[symbol]?.data || {};
+    const yahooQuote = yqCache['IN:' + symbol]?.data || {};
+    const classification = yahooClassificationCache.get(symbol)?.data || {};
+    const hasUpstox = Number(live.price) > 0;
+    const yahooPrice = Number(yahoo.yPrice || yahooQuote.price) > 0 ? Number(yahoo.yPrice || yahooQuote.price) : null;
+    const price = hasUpstox ? live.price : yahooPrice;
+    const priceSrc = hasUpstox ? 'Upstox' : yahooPrice != null ? 'Yahoo Finance (delayed)' : 'Unavailable';
+    const previousClose = hasUpstox ? live.prevClose : (yahoo.yPrevClose || yahooQuote.prevClose || null);
+    const changePct = hasUpstox ? live.changePct : (yahoo.yChangePct ?? yahooQuote.changePct ?? null);
+    const change = hasUpstox ? live.change : (price != null && previousClose != null ? +(price - previousClose).toFixed(2) : null);
+    const sector = classification.sector || yahoo.sector || 'Unclassified';
+    const industry = classification.industry || yahoo.industry || 'Unclassified';
+    const hasProviderClassification = (sector !== 'Unclassified' || industry !== 'Unclassified') &&
+      (classification.classificationProvider === 'Yahoo Finance' || yahoo.classificationProvider === 'Yahoo Finance');
     return {
-      symbol: sym, name: info.name, sector: info.sector, industry: info.industry,
+      symbol, name: item.name || STOCKS[symbol]?.name || symbol,
+      sector, industry,
+      classificationProvider: hasProviderClassification ? 'Yahoo Finance' : null,
+      classificationStatus: classification.classificationStatus || (hasProviderClassification ? 'provider_verified' : 'unclassified'),
+      classificationAsOf: classification.classificationAsOf || null,
       exchange: 'NSE', country: 'India',
-      priceSrc,
-      // Quote time is the upstream tick timestamp, not a cache/HTTP receipt time.
-      priceAsOf: hasUpstox ? (live.priceAsOf || null) : (yahoo.priceAsOf || null),
-      // Prefer authenticated Upstox data; Yahoo is only an indicative fallback.
-      price,
-      change,
-      changePct,
-      volume: hasUpstox ? (live.volume || 0) : (yahoo.yVolume || 0),
-      open: hasUpstox ? (live.open || 0) : (yahoo.yOpen || 0),
-      high: hasUpstox ? (live.high || 0) : (yahoo.yHigh || 0),
-      low: hasUpstox ? (live.low || 0) : (yahoo.yLow || 0),
-      prevClose,
-      // Real fundamentals from Yahoo Finance (null = not yet loaded)
-      pe: yahoo.pe || null,
-      fwdPe: yahoo.fwdPe || null,
-      peg: yahoo.peg || null,
-      ps: yahoo.ps || null,
-      pb: yahoo.pb || null,
-      evEbitda: yahoo.evEbitda || null,
-      eps: yahoo.eps || null,
-      roe: yahoo.roe || null,
-      roa: yahoo.roa || null,
-      debtEquity: yahoo.debtEquity || null,
-      grossMargin: yahoo.grossMargin || null,
-      operatingMargin: yahoo.operatingMargin || null,
-      netMargin: yahoo.netMargin || null,
-      dividend: yahoo.dividend || null,
-      marketCap: yahoo.marketCap || null,
-      targetPrice: yahoo.targetPrice || null,
-      beta: yahoo.beta || null,
-      sma50: yahoo.sma50 || null,
-      sma200: yahoo.sma200 || null,
-      high52w: yahoo.high52w || null,
-      low52w: yahoo.low52w || null,
-      revenueGrowth: yahoo.revenueGrowth || null,
-      earningsGrowth: yahoo.earningsGrowth || null,
-      analystRec: yahoo.analystRec || null,
-      numAnalysts: yahoo.numAnalysts || null,
-      fundamentalsLoaded: !!yahoo.pe,
+      priceSrc, priceAsOf: hasUpstox ? (live.priceAsOf || null) : (yahooQuote.priceAsOf || null),
+      price: price ?? null, change: change ?? null, changePct: changePct ?? null,
+      volume: hasUpstox ? (live.volume ?? null) : (yahooQuote.volume ?? yahoo.yVolume ?? null),
+      open: hasUpstox ? (live.open ?? null) : (yahooQuote.open ?? yahoo.yOpen ?? null),
+      high: hasUpstox ? (live.high ?? null) : (yahooQuote.high ?? yahoo.yHigh ?? null),
+      low: hasUpstox ? (live.low ?? null) : (yahooQuote.low ?? yahoo.yLow ?? null),
+      prevClose: previousClose ?? null,
+      pe: yahoo.pe ?? null, fwdPe: yahoo.fwdPe ?? null, peg: yahoo.peg ?? null,
+      ps: yahoo.ps ?? null, pb: yahoo.pb ?? null, evEbitda: yahoo.evEbitda ?? null,
+      eps: yahoo.eps ?? null, roe: yahoo.roe ?? null, roa: yahoo.roa ?? null,
+      debtEquity: yahoo.debtEquity ?? null, grossMargin: yahoo.grossMargin ?? null,
+      operatingMargin: yahoo.operatingMargin ?? null, netMargin: yahoo.netMargin ?? null,
+      dividend: yahoo.dividend ?? null, marketCap: yahoo.marketCap ?? null,
+      targetPrice: yahoo.targetPrice ?? null, beta: yahoo.beta ?? null,
+      sma50: yahoo.sma50 ?? null, sma200: yahoo.sma200 ?? null,
+      high52w: yahoo.high52w ?? null, low52w: yahoo.low52w ?? null,
+      revenueGrowth: yahoo.revenueGrowth ?? null, earningsGrowth: yahoo.earningsGrowth ?? null,
+      analystRec: yahoo.analystRec ?? null, numAnalysts: yahoo.numAnalysts ?? null,
+      fundamentalsLoaded: !!(yahoo.pe || yahoo.roe || yahoo.eps),
     };
   });
-
-  // v6: expanded NSE names served via Yahoo (delayed) — skip any already in core to avoid duplicates
-  const coreSet = new Set(Object.keys(STOCKS));
-  const extraRows = NSE_EXTRA.filter((sym) => !coreSet.has(sym)).map((sym) => {
-    const y = yqCache[`IN:${sym}`]?.data;
-    if (!y || !y.price) return null;
-    return { symbol: sym, exchange: 'NSE', country: 'India', src: 'yahoo', priceSrc: 'Yahoo', ...y };
-  }).filter(Boolean);
-  ensureYahooBatch(NSE_EXTRA, 'IN').catch(() => {});
-
-  // Launch hygiene: never surface a row with no usable price.
-  const all = [...coreRows, ...extraRows].filter((r) => (r.price || 0) > 0);
-  return all;
+  // Do not filter out securities when the quote provider is unavailable.
+  return rows;
 }));
-
 
 async function strictOptionFetch(endpoint, params) {
   try {
