@@ -607,8 +607,9 @@ async function fetchQuotesForItems(items) {
   if (!CONFIG.accessToken || Date.now() < upstoxQuoteRetryAt) return out;
   const eligible = items.filter(item => item?.key && item.key.startsWith('NSE_EQ|'));
   const headers = { Authorization: 'Bearer ' + CONFIG.accessToken, Accept: 'application/json' };
-  for (let offset = 0; offset < eligible.length; offset += 500) {
-    const batch = eligible.slice(offset, offset + 500);
+  const batches = [];
+  for (let offset = 0; offset < eligible.length; offset += 500) batches.push(eligible.slice(offset, offset + 500));
+  async function fetchBatch(batch) {
     const symbols = batch.map(item => item.symbol);
     const stockMap = Object.fromEntries(batch.map(item => [item.symbol, { isin: item.key.split('|').at(-1) }]));
     const query = batch.map(item => encodeURIComponent(item.key)).join(',');
@@ -621,12 +622,12 @@ async function fetchQuotesForItems(items) {
       if (status === 401 || status === 403) {
         upstoxQuoteRetryAt = Date.now() + 60000;
         console.warn('[Upstox screener] Authorization rejected; quote fields will remain unavailable.');
-        break;
+        return;
       }
       if (status === 429 || status >= 500 || error.code === 'ECONNABORTED') {
         upstoxQuoteRetryAt = Date.now() + 15000;
         console.warn('[Upstox screener] Provider temporarily unavailable: ' + (status || error.code || 'network'));
-        break;
+        return;
       }
       if (status === 400 || status === 422) {
         // A retired instrument can invalidate a large batch. Recover with smaller, bounded requests.
@@ -640,10 +641,15 @@ async function fetchQuotesForItems(items) {
           return parseBatchQuotes(response.data?.data, small.map(item => item.symbol), smallMap);
         }));
         for (const result of results) if (result.status === 'fulfilled') Object.assign(out, result.value);
-        continue;
+        return;
       }
       console.warn('[Upstox screener] Batch failed: ' + (status || error.code || 'network'));
     }
+  }
+  // Three bounded requests in parallel keeps the full universe inside practical API timeouts.
+  for (let offset = 0; offset < batches.length; offset += 3) {
+    await Promise.all(batches.slice(offset, offset + 3).map(fetchBatch));
+    if (Date.now() < upstoxQuoteRetryAt) break;
   }
   return out;
 }
