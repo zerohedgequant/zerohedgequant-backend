@@ -74,6 +74,31 @@ test('does not cache failed or explicitly non-cacheable responses', () => {
   assert.equal(second.body.success, true);
 });
 
+
+test('coalesces concurrent identical requests into one provider fetch', async () => {
+  const middleware = createResponseCache({
+    getPolicy: () => ({ ttlMs: 1000, shouldCache: (body) => body.success === true }),
+  });
+  const request = makeRequest('/api/option-chain/NIFTY', { expiry: '2026-11-26' });
+  const first = makeResponse();
+  let providerCalls = 0;
+  middleware(request, first, () => { providerCalls += 1; });
+
+  const second = makeResponse();
+  let secondNextCalls = 0;
+  middleware(makeRequest('/api/option-chain/NIFTY', { expiry: '2026-11-26' }), second, () => {
+    secondNextCalls += 1;
+  });
+
+  first.json({ success: true, live: true, data: { strikes: [] } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(providerCalls, 1);
+  assert.equal(secondNextCalls, 0);
+  assert.equal(second.headers['X-AHQ-Cache'], 'HIT');
+  assert.equal(second.body.live, true);
+});
+
 test('canonicalizes query keys so parameter order does not fragment the cache', () => {
   const middleware = createResponseCache({
     getPolicy: () => ({ ttlMs: 1000, shouldCache: (body) => body.success === true }),
