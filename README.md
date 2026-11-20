@@ -122,3 +122,19 @@ curl https://your-backend-url.com/api/indices
 ---
 
 Need help? Check Render/Railway docs or ask me!
+
+
+## API response caching
+
+The backend keeps a bounded, per-process response cache for selected public GET endpoints. Successful responses only are cached; provider errors and incomplete market-data responses are not cached.
+
+| Endpoint | Cache lifetime |
+| --- | ---: |
+| `/api/option-chain/:underlying?expiry=...` | 1.5 seconds |
+| `/api/stock/:symbol` | 2 seconds |
+| `/api/prices` | 5 seconds–15 minutes, based on interval |
+| `/api/search` | 5 minutes |
+
+Existing endpoint-specific caches for indices, screeners, fundamentals, scanner signals, IPO data, terminal quotes and the NSE instrument master remain in place. Identical concurrent requests are coalesced, and responses expose `X-AHQ-Cache` (`HIT` or `MISS`) plus cache age on hits.
+
+**Deployment note:** this cache is in-memory and local to one backend process. It reduces duplicate provider calls within that process, but it is cleared on restart and is not shared across multiple Render instances. Use a shared Redis-compatible store if the service is later scaled horizontally.
