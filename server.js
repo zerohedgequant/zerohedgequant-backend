@@ -7,6 +7,7 @@ const {fromYahooChart} = require('./lib/yahooChartQuote');
 const {parseBatchQuotes} = require('./lib/upstoxBatchQuotes');
 const {collectFnoSymbols} = require('./lib/terminalFnoUniverse');
 const {normalizeYahooClassification} = require('./lib/providerClassification');
+const createResponseCache = require('./lib/httpResponseCache');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -19,6 +20,52 @@ const CONFIG = {
 const ALLOWED_ORIGINS = [   'https://alphahedgequant.com',   'https://www.alphahedgequant.com',   'http://localhost:3000', ]; app.use(cors({   origin: (origin, cb) => {     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);     return cb(null, false);   },   methods: ['GET','POST','OPTIONS'],   allowedHeaders: ['Content-Type','Authorization'], }));  const RL_WINDOW_MS = 60 * 1000; const RL_MAX = 120; const RL_MAX_HEAVY = 20; const rlStore = new Map(); app.set('trust proxy', 1); function rateLimit(req, res, next) {   const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();   const now = Date.now();   let rec = rlStore.get(ip);   if (!rec || now > rec.resetAt) { rec = { count: 0, heavy: 0, resetAt: now + RL_WINDOW_MS }; rlStore.set(ip, rec); }   rec.count++;   const isHeavy = req.path.startsWith('/api/backtest') || req.path.startsWith('/api/scanner') || req.path.startsWith('/api/prices');   if (isHeavy) rec.heavy++;   if (rec.count > RL_MAX || (isHeavy && rec.heavy > RL_MAX_HEAVY)) {     return res.status(429).json({ success: false, error: 'Rate limit exceeded. Please slow down and try again shortly.' });   }   next(); } setInterval(() => { const now = Date.now(); for (const [ip, rec] of rlStore) if (now > rec.resetAt) rlStore.delete(ip); }, 5 * 60 * 1000);
 app.use(express.json());
 app.use('/api', rateLimit);
+
+// Short-lived response caching for public GET endpoints that previously
+// repeated identical provider requests. Existing endpoint-specific caches
+// (indices, screeners, fundamentals, scanner, IPOs and terminal quotes) remain
+// authoritative and are deliberately not wrapped a second time.
+app.use(createResponseCache({
+  getPolicy(req) {
+    if (/^\/api\/option-chain\/[A-Z0-9&_.-]+$/.test(req.path)) {
+      return {
+        ttlMs: 1500,
+        cacheControl: 'public, max-age=0, s-maxage=1, stale-while-revalidate=1',
+        shouldCache: (body) => body?.success === true && body?.live === true && Array.isArray(body?.data?.strikes),
+      };
+    }
+    if (/^\/api\/stock\/[A-Z0-9&_.-]+$/.test(req.path)) {
+      return {
+        ttlMs: 2000,
+        cacheControl: 'public, max-age=0, s-maxage=2, stale-while-revalidate=1',
+        shouldCache: (body) => body?.success === true && Number(body?.data?.price) > 0,
+      };
+    }
+    if (req.path === '/api/prices') {
+      const interval = String(req.query.interval || '1d');
+      const ttlByInterval = {
+        '1m': 5000, '5m': 15000, '15m': 30000, '30m': 60000,
+        '60m': 120000, '1h': 120000, '1d': 300000, '1wk': 900000,
+      };
+      const ttlMs = ttlByInterval[interval];
+      if (!ttlMs) return null;
+      const seconds = Math.max(1, Math.floor(ttlMs / 1000));
+      return {
+        ttlMs,
+        cacheControl: 'public, max-age=0, s-maxage=' + seconds + ', stale-while-revalidate=' + seconds,
+        shouldCache: (body) => body?.success === true && Array.isArray(body?.data) && body.data.length > 0,
+      };
+    }
+    if (req.path === '/api/search') {
+      return {
+        ttlMs: 300000,
+        cacheControl: 'public, max-age=60, s-maxage=300, stale-while-revalidate=300',
+        shouldCache: (body) => body?.success === true && Array.isArray(body?.data),
+      };
+    }
+    return null;
+  },
+}));
 // ═══════════════════════════════════════════════════════
 // STOCK UNIVERSE — 50 Nifty stocks, confirmed ISINs
 // ═══════════════════════════════════════════════════════
